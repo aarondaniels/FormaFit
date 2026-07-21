@@ -1,0 +1,21 @@
+# Flutter
+client/.dart_tool/
+client/build/
+client/.flutter-plugins
+client/.flutter-plugins-dependencies
+
+# iOS
+client/ios/Pods/
+client/ios/.symlinks/
+client/ios/Flutter/Flutter.framework
+client/ios/Flutter/Flutter.podspec
+client/ios/Flutter/ephemeral/
+
+# Android
+client/android/.gradle/
+client/android/local.properties
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

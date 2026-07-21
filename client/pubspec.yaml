@@ -1,0 +1,47 @@
+name: forma
+description: "Forma — a standalone strength training tracker. All data stays on device."
+
+publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_riverpod: ^3.3.2
+  intl: ^0.20.2
+  fl_chart: ^1.2.0
+  path_provider: ^2.0.15
+  # share_plus is held at 12.x: 13.x requires win32 ^6, which no stable
+  # file_picker release supports yet.
+  share_plus: ^12.0.2
+  file_picker: ^11.0.2
+  liquid_glass_widgets: ^0.18.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  # Used by the store tests to point path_provider at a scratch directory.
+  path_provider_platform_interface: ^2.1.2
+  plugin_platform_interface: ^2.1.8
+
+
+flutter:
+  uses-material-design: true
+  assets:
+    - lib/assets/icon/
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "lib/assets/icon/app_icon.png"
+  min_sdk_android: 21
+  remove_alpha_ios: true
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: "lib/assets/icon/app_icon.png"
