@@ -15,6 +15,7 @@ import '../../widgets/rest.dart';
 import '../exercise_detail_screen.dart' show trimNumber;
 import 'exercise_picker_sheet.dart';
 import 'template_picker_screen.dart';
+import 'workout_complete_sheet.dart';
 
 /// Composes a workout in memory and writes it in one shot on save.
 ///
@@ -454,6 +455,11 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     }
   }
 
+  /// Collapses the number pad by dropping focus from the active set field; the
+  /// pad is only shown while such a field is focused. A rest countdown in
+  /// progress keeps running.
+  void _collapseKeypad() => FocusManager.instance.primaryFocus?.unfocus();
+
   Future<void> _addExercises() async {
     final picked = await showExercisePicker(context);
     if (picked == null || picked.isEmpty) return;
@@ -573,7 +579,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
 
     try {
       final existing = widget.existing;
-      await mutateWith(ref, (api) async {
+      final saved = await mutateWith(ref, (api) async {
         if (existing == null) {
           return api.createWorkout(
             date: _date,
@@ -593,6 +599,14 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
           exercises: drafts,
         );
       });
+      // Celebrate a freshly completed workout with its highlights; editing an
+      // existing one just returns to the detail without the fanfare.
+      if (existing == null && mounted) {
+        final summary = await _buildSummary(saved);
+        if (summary != null && mounted) {
+          await showWorkoutCompleteSheet(context, summary);
+        }
+      }
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (mounted) {
@@ -606,6 +620,103 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       }
     }
   }
+
+  /// Gathers the highlights for the completion sheet: this session's totals,
+  /// any exercise that beat its previous best, and where the workout lands in
+  /// the all-time and weekly counts. Returns null if the store can't be read,
+  /// so a stats hiccup never blocks leaving the logger.
+  Future<WorkoutSummary?> _buildSummary(Workout saved) async {
+    try {
+      final all = await ref.read(workoutsProvider.future);
+      final byId = await ref.read(exercisesByIdProvider.future);
+      final stats = await ref.read(statsProvider.future);
+      return WorkoutSummary(
+        exerciseCount: saved.exerciseCount,
+        setCount: saved.setCount,
+        volume: saved.volume,
+        durationLabel: saved.formattedDuration,
+        totalWorkouts: stats.totalWorkouts,
+        workoutsThisWeek: stats.workoutsThisWeek,
+        weekStreak: stats.weekStreak,
+        prs: _sessionPRs(saved, all, byId),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Exercises in [saved] whose best set beat that exercise's previous all-time
+  /// best — by heaviest weight or by estimated one-rep max, so both "lifted
+  /// heavier" and "same weight for more reps" count. Only exercises with prior
+  /// history qualify, so a first-ever session isn't reported as a wall of PRs.
+  static List<PrHighlight> _sessionPRs(
+    Workout saved,
+    List<Workout> all,
+    Map<int, Exercise> byId,
+  ) {
+    final priorWeight = <int, double>{};
+    final priorOrm = <int, double>{};
+    for (final w in all) {
+      if (w.id == saved.id) continue;
+      for (final we in w.exercises) {
+        for (final s in we.sets) {
+          final wt = s.weight;
+          final r = s.reps;
+          if (wt == null || r == null || wt <= 0) continue;
+          if (wt > (priorWeight[we.exerciseId] ?? 0)) {
+            priorWeight[we.exerciseId] = wt;
+          }
+          final orm = _epley(wt, r);
+          if (orm > (priorOrm[we.exerciseId] ?? 0)) {
+            priorOrm[we.exerciseId] = orm;
+          }
+        }
+      }
+    }
+
+    // The session's best set per exercise (heaviest weight and the reps at it),
+    // plus its best estimated one-rep max.
+    final bestWeight = <int, double>{};
+    final bestReps = <int, int>{};
+    final bestOrm = <int, double>{};
+    for (final we in saved.exercises) {
+      for (final s in we.sets) {
+        final wt = s.weight;
+        final r = s.reps;
+        if (wt == null || r == null || wt <= 0) continue;
+        if (wt > (bestWeight[we.exerciseId] ?? 0)) {
+          bestWeight[we.exerciseId] = wt;
+          bestReps[we.exerciseId] = r;
+        }
+        final orm = _epley(wt, r);
+        if (orm > (bestOrm[we.exerciseId] ?? 0)) {
+          bestOrm[we.exerciseId] = orm;
+        }
+      }
+    }
+
+    final prs = <PrHighlight>[];
+    for (final id in bestWeight.keys) {
+      if (!priorWeight.containsKey(id)) continue; // no prior history to beat
+      final beatWeight = bestWeight[id]! > (priorWeight[id] ?? 0);
+      final beatOrm = (bestOrm[id] ?? 0) > (priorOrm[id] ?? 0);
+      if (beatWeight || beatOrm) {
+        prs.add(
+          PrHighlight(
+            exerciseName: byId[id]?.name ?? 'Exercise',
+            weight: bestWeight[id]!,
+            reps: bestReps[id]!,
+          ),
+        );
+      }
+    }
+    prs.sort((a, b) => a.exerciseName.compareTo(b.exerciseName));
+    return prs;
+  }
+
+  /// Epley one-rep-max estimate, matching the analytics computation.
+  static double _epley(double weight, int reps) =>
+      reps <= 1 ? weight : weight * (1 + reps / 30.0);
 
   Future<bool> _confirmDiscard() async {
     if (_entries.isEmpty) return true;
@@ -797,6 +908,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
                 ),
                 onBackspace: () => _backspaceIn(activeTarget.controller),
                 onEnter: () => _enterFromField(activeField!),
+                onCollapse: _collapseKeypad,
               ),
           ],
         ),
@@ -1346,6 +1458,7 @@ class _NumberPad extends StatelessWidget {
     required this.onKey,
     required this.onBackspace,
     required this.onEnter,
+    required this.onCollapse,
     required this.decimalEnabled,
     required this.isLastField,
   });
@@ -1353,6 +1466,10 @@ class _NumberPad extends StatelessWidget {
   final void Function(String) onKey;
   final VoidCallback onBackspace;
   final VoidCallback onEnter;
+
+  /// Dismisses the pad by dropping focus from the active field. Lets the user
+  /// reach content the pad would otherwise cover without leaving the screen.
+  final VoidCallback onCollapse;
 
   /// Reps are whole numbers, so the decimal key is disabled for them.
   final bool decimalEnabled;
@@ -1374,56 +1491,66 @@ class _NumberPad extends StatelessWidget {
           top: false,
           child: Padding(
             padding: const EdgeInsets.all(AppSpacing.sm),
-            child: SizedBox(
-              height: 240,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: Column(
-                      children: [
-                        _row(['1', '2', '3']),
-                        _row(['4', '5', '6']),
-                        _row(['7', '8', '9']),
-                        Expanded(
-                          child: Row(
-                            children: [
-                              _key(
-                                label: '.',
-                                onTap: decimalEnabled ? () => onKey('.') : null,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _CollapseBar(onTap: onCollapse),
+                SizedBox(
+                  height: 240,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        flex: 3,
+                        child: Column(
+                          children: [
+                            _row(['1', '2', '3']),
+                            _row(['4', '5', '6']),
+                            _row(['7', '8', '9']),
+                            Expanded(
+                              child: Row(
+                                children: [
+                                  _key(
+                                    label: '.',
+                                    onTap:
+                                        decimalEnabled ? () => onKey('.') : null,
+                                  ),
+                                  _key(label: '0', onTap: () => onKey('0')),
+                                  _key(
+                                    onTap: onBackspace,
+                                    child:
+                                        const Icon(Icons.backspace_outlined),
+                                  ),
+                                ],
                               ),
-                              _key(label: '0', onTap: () => onKey('0')),
-                              _key(
-                                onTap: onBackspace,
-                                child: const Icon(Icons.backspace_outlined),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        child: _button(
+                          onTap: onEnter,
+                          background: AppColors.primary,
+                          foreground: AppColors.onPrimary,
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.keyboard_return),
+                              const SizedBox(height: AppSpacing.xs),
+                              Text(
+                                isLastField ? 'Done' : 'Next',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ],
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                  Expanded(
-                    child: _button(
-                      onTap: onEnter,
-                      background: AppColors.primary,
-                      foreground: AppColors.onPrimary,
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.keyboard_return),
-                          const SizedBox(height: AppSpacing.xs),
-                          Text(
-                            isLastField ? 'Done' : 'Next',
-                            style: const TextStyle(fontWeight: FontWeight.w600),
-                          ),
-                        ],
                       ),
-                    ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -1478,6 +1605,49 @@ class _NumberPad extends StatelessWidget {
                   ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The dismiss affordance across the top of the number pad: a centered grab
+/// handle with a chevron, the whole bar tappable to collapse the pad.
+class _CollapseBar extends StatelessWidget {
+  const _CollapseBar({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppSpacing.radiusSmall),
+      child: SizedBox(
+        height: 32,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: AppColors.cta,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: EdgeInsets.only(right: AppSpacing.sm),
+                child: Icon(
+                  Icons.keyboard_arrow_down,
+                  size: 22,
+                  color: AppColors.mutedOnDark,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
