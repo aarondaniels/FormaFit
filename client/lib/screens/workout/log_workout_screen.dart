@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -33,7 +34,8 @@ class LogWorkoutScreen extends ConsumerStatefulWidget {
   ConsumerState<LogWorkoutScreen> createState() => _LogWorkoutScreenState();
 }
 
-class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
+class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
+    with WidgetsBindingObserver {
   final List<_ExerciseEntry> _entries = [];
   final _notes = TextEditingController();
 
@@ -53,13 +55,30 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
   int? _fixedDuration;
 
   /// Rest countdown, shared across the workout (one rest runs at a time).
+  ///
+  /// The countdown is anchored to a wall-clock [_restEndTime] rather than a
+  /// decrementing counter, so backgrounding the app (which pauses the ticker)
+  /// no longer loses time — on resume the remaining time is recomputed from the
+  /// clock. [_restRemaining]/[_restTotal] are just the values the UI shows.
   Timer? _restTicker;
+  DateTime? _restEndTime;
   int _restRemaining = 0;
   int _restTotal = 0;
+
+  /// Plays the rest-complete chime. Created lazily on first use and reused so
+  /// repeated alerts don't spin up a new player each time.
+  AudioPlayer? _restPlayer;
 
   @override
   void initState() {
     super.initState();
+    // Logging a set is a portrait task — the number pad and set rows are laid
+    // out for it — so lock out landscape while this screen is up and a mid-set
+    // rotation can't reflow the keypad. Restored in dispose.
+    SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+    // Observe app lifecycle so a rest countdown running while the user switches
+    // to another app is re-synced to the wall clock on return.
+    WidgetsBinding.instance.addObserver(this);
     // Rebuild when focus moves so the keyboard toolbar shows only while a set
     // field is active and reflects which field that is.
     FocusManager.instance.addListener(_onFocusChange);
@@ -123,9 +142,14 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
 
   @override
   void dispose() {
+    // Hand rotation back to the rest of the app (empty = all orientations the
+    // app declares support for).
+    SystemChrome.setPreferredOrientations(const []);
+    WidgetsBinding.instance.removeObserver(this);
     FocusManager.instance.removeListener(_onFocusChange);
     _ticker?.cancel();
     _restTicker?.cancel();
+    _restPlayer?.dispose();
     _notes.dispose();
     for (final e in _entries) {
       e.dispose();
@@ -324,35 +348,86 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
   void _startRest(int seconds) {
     _restTicker?.cancel();
     if (seconds <= 0) return;
+    _restEndTime = DateTime.now().add(Duration(seconds: seconds));
     setState(() {
       _restTotal = seconds;
       _restRemaining = seconds;
     });
-    _restTicker = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!mounted) return;
-      setState(() => _restRemaining--);
-      if (_restRemaining <= 0) {
-        t.cancel();
-        _restTicker = null;
-        // A buzz and a beep so the cue lands without watching the screen.
-        HapticFeedback.heavyImpact();
-        SystemSound.play(SystemSoundType.alert);
-      }
-    });
+    _restTicker =
+        Timer.periodic(const Duration(seconds: 1), (_) => _tickRest());
+  }
+
+  /// Recomputes the remaining rest from the wall clock and, on reaching zero,
+  /// ends the rest and fires the alert. Driven both by the 1-second ticker and
+  /// by an app resume, so a rest that elapsed while foregrounded still alerts.
+  void _tickRest() {
+    if (!mounted) return;
+    final end = _restEndTime;
+    if (end == null) return;
+    final msLeft = end.difference(DateTime.now()).inMilliseconds;
+    if (msLeft <= 0) {
+      _completeRest(alert: true);
+    } else {
+      setState(() => _restRemaining = (msLeft / 1000).ceil());
+    }
+  }
+
+  /// Clears the running rest. Fires the buzz + chime when [alert] is set (a
+  /// natural expiry) and stays silent otherwise (skip, or manual -15 to zero).
+  void _completeRest({required bool alert}) {
+    _restTicker?.cancel();
+    _restTicker = null;
+    _restEndTime = null;
+    setState(() => _restRemaining = 0);
+    if (alert) _fireRestAlert();
+  }
+
+  /// A buzz and a chime so the end of rest lands without watching the screen.
+  /// The haptic is reliable on iOS; the audio is what makes it audible, since
+  /// SystemSound.alert is a no-op in-app there.
+  Future<void> _fireRestAlert() async {
+    HapticFeedback.heavyImpact();
+    try {
+      final player = _restPlayer ??= AudioPlayer();
+      await player.stop();
+      await player.play(AssetSource('sounds/rest_complete.wav'));
+    } catch (_) {
+      // If audio playback fails for any reason, the haptic still fired — a
+      // silent alert beats a crash mid-workout.
+    }
   }
 
   void _adjustRest(int delta) {
-    if (_restTicker == null) return;
+    final end = _restEndTime;
+    if (end == null) return;
+    final newEnd = end.add(Duration(seconds: delta));
+    final msLeft = newEnd.difference(DateTime.now()).inMilliseconds;
+    // Trimming rest down to zero just ends it — no alarm for a manual stop.
+    if (msLeft <= 0) {
+      _completeRest(alert: false);
+      return;
+    }
     setState(() {
-      _restRemaining = (_restRemaining + delta).clamp(0, 3599);
+      _restEndTime = newEnd;
+      _restRemaining = (msLeft / 1000).ceil();
       if (_restRemaining > _restTotal) _restTotal = _restRemaining;
     });
   }
 
-  void _skipRest() {
-    _restTicker?.cancel();
-    _restTicker = null;
-    setState(() => _restRemaining = 0);
+  void _skipRest() => _completeRest(alert: false);
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The ticker is paused while backgrounded, so on resume re-sync the
+    // countdown to the clock. If the rest already elapsed while away, end it
+    // (silently — the moment has passed and a stale chime would confuse).
+    if (state != AppLifecycleState.resumed || _restEndTime == null) return;
+    final msLeft = _restEndTime!.difference(DateTime.now()).inMilliseconds;
+    if (msLeft <= 0) {
+      _completeRest(alert: false);
+    } else {
+      setState(() => _restRemaining = (msLeft / 1000).ceil());
+    }
   }
 
   /// Deletes the selection, or the character before the caret.

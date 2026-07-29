@@ -22,6 +22,9 @@ dependencies:
   file_selector: ^1.0.3
   csv: ^6.0.0
   liquid_glass_widgets: ^0.18.4
+  # Plays the rest-timer completion chime; SystemSound.alert is a no-op in-app
+  # on iOS, so a real audio player is the only way to get an audible cue.
+  audioplayers: ^6.1.0
 
 dev_dependencies:
   flutter_test:
@@ -37,6 +40,7 @@ flutter:
   uses-material-design: true
   assets:
     - lib/assets/icon/
+    - lib/assets/sounds/
 
 flutter_launcher_icons:
   android: "launcher_icon"
