@@ -5,6 +5,7 @@ import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
+import '../../widgets/rest.dart';
 import '../exercise_detail_screen.dart' show trimNumber;
 import '../workout/exercise_picker_sheet.dart';
 
@@ -44,6 +45,7 @@ class _EditorState extends ConsumerState<TemplateEditorScreen> {
             sets: te.defaultSets,
             weight: te.defaultWeight,
             reps: te.defaultReps,
+            restSeconds: te.restSeconds,
           ),
         );
       }
@@ -93,6 +95,7 @@ class _EditorState extends ConsumerState<TemplateEditorScreen> {
           defaultSets: _rows[i].sets,
           defaultWeight: _rows[i].weight,
           defaultReps: _rows[i].reps,
+          restSeconds: _rows[i].restSeconds,
         ),
     ];
 
@@ -130,6 +133,7 @@ class _EditorState extends ConsumerState<TemplateEditorScreen> {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: GlassAppBar(
+        leading: const GlassBackButton(icon: Icons.close),
         title: Text(
           widget.existing == null ? 'New template' : 'Edit template',
         ),
@@ -249,6 +253,13 @@ class _ExerciseRowCard extends StatelessWidget {
                 ),
               ),
               Expanded(child: Text(name, style: AppTypography.h6)),
+              RestChip(
+                seconds: row.restSeconds,
+                onChanged: (v) {
+                  row.restSeconds = v;
+                  onChanged();
+                },
+              ),
               IconButton(
                 icon: const Icon(Icons.close, size: 18),
                 onPressed: onRemove,
@@ -326,6 +337,7 @@ class _Row {
     int sets = 3,
     double? weight,
     int? reps,
+    this.restSeconds = 90,
   }) : setsController = TextEditingController(text: '$sets'),
        weightController = TextEditingController(
          text: weight == null ? '' : trimNumber(weight),
@@ -336,6 +348,10 @@ class _Row {
   final TextEditingController setsController;
   final TextEditingController weightController;
   final TextEditingController repsController;
+
+  /// Rest between sets, in seconds; carried into a workout. Mutable via the
+  /// rest chip.
+  int restSeconds;
 
   /// At least one set, so an applied template always produces a row to fill in.
   int get sets {

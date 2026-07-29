@@ -26,7 +26,10 @@ class _MeasurementsScreenState extends ConsumerState<MeasurementsScreen> {
 
     return Scaffold(
       extendBodyBehindAppBar: true,
-      appBar: const GlassAppBar(title: Text('Measurements')),
+      appBar: const GlassAppBar(
+        leading: GlassBackButton(),
+        title: Text('Measurements'),
+      ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => _showEntrySheet(context, ref, kind: _kind),
         icon: const Icon(Icons.add),

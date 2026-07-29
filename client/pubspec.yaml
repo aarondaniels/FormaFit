@@ -3,7 +3,7 @@ description: "Forma — a standalone strength training tracker. All data stays o
 
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
-version: 1.0.0+1
+version: 2.0.0+4
 
 environment:
   sdk: ^3.11.5
@@ -16,10 +16,11 @@ dependencies:
   intl: ^0.20.2
   fl_chart: ^1.2.0
   path_provider: ^2.0.15
-  # share_plus is held at 12.x: 13.x requires win32 ^6, which no stable
-  # file_picker release supports yet.
   share_plus: ^12.0.2
-  file_picker: ^11.0.2
+  # Document-only picker (UIDocumentPicker on iOS) — unlike file_picker it
+  # doesn't link the Photos framework, so no photo-library permission is needed.
+  file_selector: ^1.0.3
+  csv: ^6.0.0
   liquid_glass_widgets: ^0.18.4
 
 dev_dependencies:

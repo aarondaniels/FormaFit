@@ -37,6 +37,14 @@ class AppColors {
   };
 
   static Color forMuscleGroup(String group) => muscleGroup[group] ?? secondary;
+
+  /// A stable accent per superset group (group ids are 1-based), so the
+  /// exercises in one superset read as a unit and different supersets stay
+  /// visually distinct.
+  static const supersetPalette = [primary, success, warning, accent];
+
+  static Color forSuperset(int group) =>
+      supersetPalette[(group - 1) % supersetPalette.length];
 }
 
 class AppSpacing {

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
@@ -9,6 +10,7 @@ import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
+import '../../widgets/rest.dart';
 import '../exercise_detail_screen.dart' show trimNumber;
 import 'exercise_picker_sheet.dart';
 import 'template_picker_screen.dart';
@@ -18,10 +20,14 @@ import 'template_picker_screen.dart';
 /// Nothing is persisted until the user saves, so an abandoned session leaves
 /// no half-logged workout behind.
 class LogWorkoutScreen extends ConsumerStatefulWidget {
-  const LogWorkoutScreen({super.key, this.existing});
+  const LogWorkoutScreen({super.key, this.existing, this.fromTemplate});
 
   /// When set, the screen edits this workout instead of starting a new one.
   final Workout? existing;
+
+  /// When set (and [existing] is null), starts a fresh session pre-filled from
+  /// this template — its exercises and their default sets, weight and reps.
+  final Template? fromTemplate;
 
   @override
   ConsumerState<LogWorkoutScreen> createState() => _LogWorkoutScreenState();
@@ -36,15 +42,27 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
   String? _templateName;
   bool _saving = false;
 
+  /// Hands out group ids for supersets. Unique within this workout is enough;
+  /// it starts above any group already present when editing.
+  int _nextSupersetGroup = 1;
+
   /// Wall-clock timer for a live session. Editing an existing workout keeps
   /// its recorded duration rather than timing the edit.
   Stopwatch? _stopwatch;
   Timer? _ticker;
   int? _fixedDuration;
 
+  /// Rest countdown, shared across the workout (one rest runs at a time).
+  Timer? _restTicker;
+  int _restRemaining = 0;
+  int _restTotal = 0;
+
   @override
   void initState() {
     super.initState();
+    // Rebuild when focus moves so the keyboard toolbar shows only while a set
+    // field is active and reflects which field that is.
+    FocusManager.instance.addListener(_onFocusChange);
     final existing = widget.existing;
     if (existing != null) {
       _date = existing.date;
@@ -57,24 +75,57 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
           _ExerciseEntry(
             exerciseId: we.exerciseId,
             notes: we.notes,
+            supersetGroup: we.supersetGroup,
+            restSeconds: we.restSeconds,
             sets: [
               for (final s in we.sets) _SetEntry(weight: s.weight, reps: s.reps),
             ],
           ),
         );
       }
+      // Continue group numbering above whatever the workout already uses.
+      final maxGroup = existing.exercises
+          .map((e) => e.supersetGroup ?? 0)
+          .fold(0, (a, b) => a > b ? a : b);
+      _nextSupersetGroup = maxGroup + 1;
     } else {
       _stopwatch = Stopwatch()..start();
       _ticker = Timer.periodic(
         const Duration(seconds: 1),
         (_) => setState(() {}),
       );
+      // A new session started from a template comes in pre-filled.
+      final template = widget.fromTemplate;
+      if (template != null) _populateFromTemplate(template);
+    }
+  }
+
+  /// Appends a template's exercises to the current entries, seeding each set
+  /// with the template's defaults. Mutates state directly so it can be called
+  /// from [initState]; callers already inside the widget tree wrap it in
+  /// [setState].
+  void _populateFromTemplate(Template template) {
+    _templateName = template.name;
+    for (final te in template.exercises) {
+      _entries.add(
+        _ExerciseEntry(
+          exerciseId: te.exerciseId,
+          restSeconds: te.restSeconds,
+          sets: List.generate(
+            // A template with zero sets still needs one row to type into.
+            te.defaultSets < 1 ? 1 : te.defaultSets,
+            (_) => _SetEntry(weight: te.defaultWeight, reps: te.defaultReps),
+          ),
+        ),
+      );
     }
   }
 
   @override
   void dispose() {
+    FocusManager.instance.removeListener(_onFocusChange);
     _ticker?.cancel();
+    _restTicker?.cancel();
     _notes.dispose();
     for (final e in _entries) {
       e.dispose();
@@ -82,14 +133,260 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
     super.dispose();
   }
 
+  void _onFocusChange() {
+    if (!mounted) return;
+    setState(() {});
+    // A set field focused via the Enter key (or a tap that the number pad then
+    // covers) won't scroll itself into view, so bring it above the pad here.
+    final node = FocusManager.instance.primaryFocus;
+    if (node == null || !_isSetFieldNode(node)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = node.context;
+      if (ctx != null && ctx.mounted) {
+        Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.5,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  bool _isSetFieldNode(FocusNode node) {
+    for (final e in _entries) {
+      for (final s in e.sets) {
+        if (s.weightFocus == node || s.repsFocus == node) return true;
+      }
+    }
+    return false;
+  }
+
   int? get _duration => _stopwatch?.elapsed.inSeconds ?? _fixedDuration;
+
+  /// Every set field in the order focus should walk through them: down the sets
+  /// of a plain exercise, but interleaved across the members of a superset
+  /// (A1, B1, A2, B2, …), matching how a superset is actually performed.
+  List<FocusNode> _focusOrder() {
+    final order = <FocusNode>[];
+    var i = 0;
+    while (i < _entries.length) {
+      final group = _entries[i].supersetGroup;
+      if (group == null) {
+        for (final s in _entries[i].sets) {
+          order
+            ..add(s.weightFocus)
+            ..add(s.repsFocus);
+        }
+        i++;
+        continue;
+      }
+      // Gather the contiguous run of exercises sharing this superset.
+      final block = <_ExerciseEntry>[];
+      while (i < _entries.length && _entries[i].supersetGroup == group) {
+        block.add(_entries[i]);
+        i++;
+      }
+      final maxSets = block.fold<int>(
+        0,
+        (m, e) => e.sets.length > m ? e.sets.length : m,
+      );
+      for (var s = 0; s < maxSets; s++) {
+        for (final e in block) {
+          if (s < e.sets.length) {
+            order
+              ..add(e.sets[s].weightFocus)
+              ..add(e.sets[s].repsFocus);
+          }
+        }
+      }
+    }
+    return order;
+  }
+
+  /// Moves focus to the field after [current]; dismisses the number pad when
+  /// [current] is the last field in the workout.
+  void _focusNextField(FocusNode current) {
+    final order = _focusOrder();
+    final idx = order.indexOf(current);
+    if (idx == -1) return;
+    if (idx + 1 < order.length) {
+      FocusScope.of(context).requestFocus(order[idx + 1]);
+    } else {
+      FocusScope.of(context).unfocus();
+    }
+  }
+
+  /// The set field currently focused: its controller, whether it is a weight
+  /// field (decimals allowed) rather than reps, and which exercise/set it is
+  /// (so its historical value can be looked up). Null when no set field has
+  /// focus.
+  ({
+    TextEditingController controller,
+    bool isWeight,
+    int exerciseId,
+    int setIndex,
+    int restSeconds,
+  })?
+  _activeFieldTarget(FocusNode? node) {
+    if (node == null) return null;
+    for (final e in _entries) {
+      for (var i = 0; i < e.sets.length; i++) {
+        final s = e.sets[i];
+        if (s.weightFocus == node) {
+          return (
+            controller: s.weightController,
+            isWeight: true,
+            exerciseId: e.exerciseId,
+            setIndex: i,
+            restSeconds: e.restSeconds,
+          );
+        }
+        if (s.repsFocus == node) {
+          return (
+            controller: s.repsController,
+            isWeight: false,
+            exerciseId: e.exerciseId,
+            setIndex: i,
+            restSeconds: e.restSeconds,
+          );
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Advances from [current] to the next field, first filling it with this
+  /// set's value from last time when it was left blank — so a user can adopt
+  /// their previous workout by tapping Enter straight down the fields.
+  void _enterFromField(FocusNode current) {
+    final target = _activeFieldTarget(current);
+    if (target != null && target.controller.text.trim().isEmpty) {
+      final value = _historicalValue(
+        target.exerciseId,
+        target.setIndex,
+        target.isWeight,
+      );
+      if (value != null) {
+        target.controller.value = TextEditingValue(
+          text: value,
+          selection: TextSelection.collapsed(offset: value.length),
+        );
+      }
+    }
+    // Leaving a reps field with a value completes the set — kick off the rest
+    // timer for that exercise.
+    if (target != null &&
+        !target.isWeight &&
+        target.restSeconds > 0 &&
+        target.controller.text.trim().isNotEmpty) {
+      _startRest(target.restSeconds);
+    }
+    _focusNextField(current);
+  }
+
+  /// The value logged for this exercise's set at [setIndex] the last time it
+  /// was performed — the same figure shown greyed under the field. Null when
+  /// there is no matching historical set.
+  String? _historicalValue(int exerciseId, int setIndex, bool isWeight) {
+    final last = ref.read(exerciseHistoryProvider(exerciseId)).value?.firstOrNull;
+    if (last == null || setIndex >= last.sets.length) return null;
+    final set = last.sets[setIndex];
+    if (isWeight) {
+      final w = set.weight;
+      return w == null ? null : trimNumber(w);
+    }
+    return set.reps?.toString();
+  }
+
+  /// Inserts [key] at the caret, keeping weights to a single decimal point.
+  void _typeInto(TextEditingController ctrl, bool decimal, String key) {
+    final text = ctrl.text;
+    final sel = ctrl.selection;
+    var start = sel.start;
+    var end = sel.end;
+    if (start < 0 || end < 0) {
+      start = text.length;
+      end = text.length;
+    }
+    final candidate = text.replaceRange(start, end, key);
+    if (key == '.' && (!decimal || '.'.allMatches(candidate).length > 1)) {
+      return;
+    }
+    ctrl.value = TextEditingValue(
+      text: candidate,
+      selection: TextSelection.collapsed(offset: start + key.length),
+    );
+  }
+
+  // --- Rest timer ---------------------------------------------------------
+
+  void _startRest(int seconds) {
+    _restTicker?.cancel();
+    if (seconds <= 0) return;
+    setState(() {
+      _restTotal = seconds;
+      _restRemaining = seconds;
+    });
+    _restTicker = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return;
+      setState(() => _restRemaining--);
+      if (_restRemaining <= 0) {
+        t.cancel();
+        _restTicker = null;
+        // A buzz and a beep so the cue lands without watching the screen.
+        HapticFeedback.heavyImpact();
+        SystemSound.play(SystemSoundType.alert);
+      }
+    });
+  }
+
+  void _adjustRest(int delta) {
+    if (_restTicker == null) return;
+    setState(() {
+      _restRemaining = (_restRemaining + delta).clamp(0, 3599);
+      if (_restRemaining > _restTotal) _restTotal = _restRemaining;
+    });
+  }
+
+  void _skipRest() {
+    _restTicker?.cancel();
+    _restTicker = null;
+    setState(() => _restRemaining = 0);
+  }
+
+  /// Deletes the selection, or the character before the caret.
+  void _backspaceIn(TextEditingController ctrl) {
+    final text = ctrl.text;
+    final sel = ctrl.selection;
+    var start = sel.start;
+    var end = sel.end;
+    if (start < 0 || end < 0) {
+      start = text.length;
+      end = text.length;
+    }
+    if (start == end) {
+      if (start == 0) return;
+      ctrl.value = TextEditingValue(
+        text: text.replaceRange(start - 1, start, ''),
+        selection: TextSelection.collapsed(offset: start - 1),
+      );
+    } else {
+      ctrl.value = TextEditingValue(
+        text: text.replaceRange(start, end, ''),
+        selection: TextSelection.collapsed(offset: start),
+      );
+    }
+  }
 
   Future<void> _addExercises() async {
     final picked = await showExercisePicker(context);
     if (picked == null || picked.isEmpty) return;
     setState(() {
       for (final id in picked) {
-        _entries.add(_ExerciseEntry(exerciseId: id, sets: [_SetEntry()]));
+        _entries.add(
+          _ExerciseEntry(exerciseId: id, sets: [_SetEntry()]),
+        );
       }
     });
   }
@@ -99,25 +396,57 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
       MaterialPageRoute(builder: (_) => const TemplatePickerScreen()),
     );
     if (template == null) return;
+    setState(() => _populateFromTemplate(template));
+  }
+
+  /// Links the exercise at [i] into a superset with the one directly above it.
+  void _supersetWithPrevious(int i) {
+    if (i > 0) _mergeSuperset(i - 1, i);
+  }
+
+  /// Links the exercise at [i] into a superset with the one directly below it.
+  void _supersetWithNext(int i) {
+    if (i < _entries.length - 1) _mergeSuperset(i, i + 1);
+  }
+
+  /// Puts the exercises at [a] and [b] in the same superset group. Whichever
+  /// side is already grouped wins; if both are (in different groups) the two
+  /// groups are folded into one, so any number of exercises can end up joined.
+  void _mergeSuperset(int a, int b) {
     setState(() {
-      _templateName = template.name;
-      for (final te in template.exercises) {
-        _entries.add(
-          _ExerciseEntry(
-            exerciseId: te.exerciseId,
-            sets: List.generate(
-              // A template with zero sets still needs one row to type into.
-              te.defaultSets < 1 ? 1 : te.defaultSets,
-              (_) => _SetEntry(
-                weight: te.defaultWeight,
-                reps: te.defaultReps,
-              ),
-            ),
-          ),
-        );
+      final ga = _entries[a].supersetGroup;
+      final gb = _entries[b].supersetGroup;
+      if (ga == null && gb == null) {
+        final group = _nextSupersetGroup++;
+        _entries[a].supersetGroup = group;
+        _entries[b].supersetGroup = group;
+      } else if (ga == null) {
+        _entries[a].supersetGroup = gb;
+      } else if (gb == null) {
+        _entries[b].supersetGroup = ga;
+      } else if (ga != gb) {
+        for (final e in _entries) {
+          if (e.supersetGroup == gb) e.supersetGroup = ga;
+        }
       }
     });
   }
+
+  /// Removes the exercise at [i] from its superset. A group left with a single
+  /// member is dissolved, since a superset of one is meaningless.
+  void _leaveSuperset(int i) {
+    setState(() {
+      final group = _entries[i].supersetGroup;
+      _entries[i].supersetGroup = null;
+      if (group == null) return;
+      final remaining = _entries.where((e) => e.supersetGroup == group);
+      if (remaining.length == 1) remaining.first.supersetGroup = null;
+    });
+  }
+
+  /// A stable color per superset group, so grouped cards read as one unit.
+  Color? _supersetColor(int? group) =>
+      group == null ? null : AppColors.forSuperset(group);
 
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
@@ -144,6 +473,8 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
         WorkoutExerciseDraft(
           exerciseId: e.exerciseId,
           notes: e.notes,
+          supersetGroup: e.supersetGroup,
+          restSeconds: e.restSeconds,
           // Drop rows the user left completely blank rather than storing
           // empty sets that would skew set counts.
           sets: [
@@ -234,6 +565,21 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
     final isEdit = widget.existing != null;
     final elapsed = _stopwatch?.elapsed;
 
+    // Show the keyboard toolbar only while one of the numeric set fields holds
+    // focus — not for the notes field, which has its own return key.
+    final setNodes = <FocusNode>{
+      for (final e in _entries)
+        for (final s in e.sets) ...[s.weightFocus, s.repsFocus],
+    };
+    final focused = FocusManager.instance.primaryFocus;
+    final activeField = (focused != null && setNodes.contains(focused))
+        ? focused
+        : null;
+    final activeTarget = _activeFieldTarget(activeField);
+    final order = activeField == null ? const <FocusNode>[] : _focusOrder();
+    final isLastField =
+        activeField != null && order.isNotEmpty && order.last == activeField;
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
@@ -245,75 +591,33 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
       child: Scaffold(
         extendBodyBehindAppBar: true,
         appBar: GlassAppBar(
+          leading: const GlassBackButton(icon: Icons.close),
           title: Text(isEdit ? 'Edit workout' : 'Log workout'),
           actions: [
+            if (elapsed != null)
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.only(right: AppSpacing.sm),
+                  child: Text(
+                    _formatElapsed(elapsed),
+                    style: AppTypography.numeric.copyWith(
+                      color: AppColors.primary,
+                    ),
+                  ),
+                ),
+              ),
             GlassIconButton(
               icon: const Icon(Icons.check),
               onPressed: _saving ? null : _save,
             ),
           ],
         ),
-        body: ListView(
-          padding: glassPagePadding(context),
+        body: Column(
           children: [
-            GlassSection(
-              title: 'Session',
-              trailing: elapsed == null
-                  ? null
-                  : Text(
-                      _formatElapsed(elapsed),
-                      style: AppTypography.numeric.copyWith(
-                        color: AppColors.primary,
-                      ),
-                    ),
-              child: Column(
+            Expanded(
+              child: ListView(
+                padding: glassPagePadding(context),
                 children: [
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.calendar_today, size: 20),
-                    title: Text(DateFormat.yMMMEd().format(_date)),
-                    trailing: TextButton(
-                      onPressed: _pickDate,
-                      child: const Text('Change'),
-                    ),
-                  ),
-                  if (_templateName != null)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.description_outlined, size: 20),
-                      title: Text(_templateName!),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.close, size: 18),
-                        onPressed: () => setState(() => _templateName = null),
-                      ),
-                    ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Row(
-                    children: [
-                      Text('Effort', style: AppTypography.caption),
-                      Expanded(
-                        child: Slider(
-                          value: _effort.toDouble(),
-                          min: 1,
-                          max: 10,
-                          divisions: 9,
-                          label: '$_effort',
-                          onChanged: (v) =>
-                              setState(() => _effort = v.round()),
-                        ),
-                      ),
-                      Text(
-                        '$_effort/10',
-                        style: AppTypography.numeric.copyWith(
-                          color: AppColors.mutedOnDark,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: AppSpacing.lg),
             if (_entries.isEmpty)
               GlassCard(
                 padding: const EdgeInsets.all(AppSpacing.lg),
@@ -346,6 +650,17 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
                   padding: const EdgeInsets.only(bottom: AppSpacing.md),
                   child: _ExerciseCard(
                     entry: _entries[i],
+                    supersetColor: _supersetColor(_entries[i].supersetGroup),
+                    // The first card has nothing above it, the last nothing
+                    // below, to pair with.
+                    canSupersetWithPrevious: i > 0,
+                    canSupersetWithNext: i < _entries.length - 1,
+                    onSupersetWithPrevious: () => _supersetWithPrevious(i),
+                    onSupersetWithNext: () => _supersetWithNext(i),
+                    onLeaveSuperset: () => _leaveSuperset(i),
+                    onRestChanged: (v) =>
+                        setState(() => _entries[i].restSeconds = v),
+                    onStartRest: () => _startRest(_entries[i].restSeconds),
                     onChanged: () => setState(() {}),
                     onRemove: () => setState(() {
                       _entries.removeAt(i).dispose();
@@ -373,6 +688,8 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
               ],
             ),
             const SizedBox(height: AppSpacing.lg),
+            _sessionDetails(),
+            const SizedBox(height: AppSpacing.lg),
             TextField(
               controller: _notes,
               maxLines: 3,
@@ -383,8 +700,84 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
               onPressed: _saving ? null : _save,
               child: Text(_saving ? 'Saving…' : 'Save workout'),
             ),
+                ],
+              ),
+            ),
+            if (_restRemaining > 0)
+              _RestBar(
+                remaining: _restRemaining,
+                total: _restTotal,
+                onAdd: () => _adjustRest(15),
+                onSubtract: () => _adjustRest(-15),
+                onSkip: _skipRest,
+              ),
+            if (activeTarget != null)
+              _NumberPad(
+                decimalEnabled: activeTarget.isWeight,
+                isLastField: isLastField,
+                onKey: (k) => _typeInto(
+                  activeTarget.controller,
+                  activeTarget.isWeight,
+                  k,
+                ),
+                onBackspace: () => _backspaceIn(activeTarget.controller),
+                onEnter: () => _enterFromField(activeField!),
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Date, effort and template — the workout's metadata. Kept below the
+  /// exercises so the logging surface leads with the work itself.
+  Widget _sessionDetails() {
+    return GlassSection(
+      title: 'Session details',
+      child: Column(
+        children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.calendar_today, size: 20),
+            title: Text(DateFormat.yMMMEd().format(_date)),
+            trailing: TextButton(
+              onPressed: _pickDate,
+              child: const Text('Change'),
+            ),
+          ),
+          if (_templateName != null)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.description_outlined, size: 20),
+              title: Text(_templateName!),
+              trailing: IconButton(
+                icon: const Icon(Icons.close, size: 18),
+                onPressed: () => setState(() => _templateName = null),
+              ),
+            ),
+          const SizedBox(height: AppSpacing.sm),
+          Row(
+            children: [
+              Text('Effort', style: AppTypography.caption),
+              Expanded(
+                child: Slider(
+                  value: _effort.toDouble(),
+                  min: 1,
+                  max: 10,
+                  divisions: 9,
+                  label: '$_effort',
+                  onChanged: (v) => setState(() => _effort = v.round()),
+                ),
+              ),
+              Text(
+                '$_effort/10',
+                style: AppTypography.numeric.copyWith(
+                  color: AppColors.mutedOnDark,
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -402,28 +795,66 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen> {
 class _ExerciseCard extends ConsumerWidget {
   const _ExerciseCard({
     required this.entry,
+    required this.supersetColor,
+    required this.canSupersetWithPrevious,
+    required this.canSupersetWithNext,
+    required this.onSupersetWithPrevious,
+    required this.onSupersetWithNext,
+    required this.onLeaveSuperset,
+    required this.onRestChanged,
+    required this.onStartRest,
     required this.onChanged,
     required this.onRemove,
   });
 
   final _ExerciseEntry entry;
+
+  /// Non-null when this exercise belongs to a superset; the shared group color.
+  final Color? supersetColor;
+  final bool canSupersetWithPrevious;
+  final bool canSupersetWithNext;
+  final VoidCallback onSupersetWithPrevious;
+  final VoidCallback onSupersetWithNext;
+  final VoidCallback onLeaveSuperset;
+  final ValueChanged<int> onRestChanged;
+  final VoidCallback onStartRest;
   final VoidCallback onChanged;
   final VoidCallback onRemove;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final exercise =
-        ref.watch(exercisesByIdProvider).value?[entry.exerciseId];
-    final lastSession = ref
+    final exercise = ref.watch(exercisesByIdProvider).value?[entry.exerciseId];
+    // The most recent time this exercise was logged, matched set-for-set below
+    // the entry fields as a reference for what to beat.
+    final lastSets = ref
         .watch(exerciseHistoryProvider(entry.exerciseId))
         .value
-        ?.firstOrNull;
+        ?.firstOrNull
+        ?.sets;
 
-    return GlassCard(
+    final card = GlassCard(
       padding: const EdgeInsets.all(AppSpacing.md),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (supersetColor != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+              child: Row(
+                children: [
+                  Icon(Icons.link, size: 14, color: supersetColor),
+                  const SizedBox(width: AppSpacing.xs),
+                  Text(
+                    'Superset',
+                    style: AppTypography.small.copyWith(
+                      color: supersetColor,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Row(
             children: [
               Expanded(
@@ -432,22 +863,66 @@ class _ExerciseCard extends ConsumerWidget {
                   style: AppTypography.h5,
                 ),
               ),
-              IconButton(
-                icon: const Icon(Icons.close, size: 18),
-                onPressed: onRemove,
+              RestChip(seconds: entry.restSeconds, onChanged: onRestChanged),
+              PopupMenuButton<String>(
+                icon: const Icon(Icons.more_vert, size: 20),
+                onSelected: (value) => switch (value) {
+                  'start-rest' => onStartRest(),
+                  'superset-prev' => onSupersetWithPrevious(),
+                  'superset-next' => onSupersetWithNext(),
+                  'leave' => onLeaveSuperset(),
+                  'remove' => onRemove(),
+                  _ => null,
+                },
+                itemBuilder: (_) => [
+                  if (entry.restSeconds > 0)
+                    const PopupMenuItem(
+                      value: 'start-rest',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.timer_outlined),
+                        title: Text('Start rest timer'),
+                      ),
+                    ),
+                  if (canSupersetWithPrevious)
+                    const PopupMenuItem(
+                      value: 'superset-prev',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.arrow_upward),
+                        title: Text('Superset with previous'),
+                      ),
+                    ),
+                  if (canSupersetWithNext)
+                    const PopupMenuItem(
+                      value: 'superset-next',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.arrow_downward),
+                        title: Text('Superset with next'),
+                      ),
+                    ),
+                  if (entry.supersetGroup != null)
+                    const PopupMenuItem(
+                      value: 'leave',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.link_off),
+                        title: Text('Leave superset'),
+                      ),
+                    ),
+                  const PopupMenuItem(
+                    value: 'remove',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.delete_outline),
+                      title: Text('Remove exercise'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
-          if (lastSession != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-              child: Text(
-                'Last time: ${lastSession.sets.map(_shortSet).join(', ')}',
-                style: AppTypography.small.copyWith(
-                  color: AppColors.mutedOnDark,
-                ),
-              ),
-            ),
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [
@@ -455,6 +930,7 @@ class _ExerciseCard extends ConsumerWidget {
               Expanded(
                 child: Text(
                   'Weight (lb)',
+                  textAlign: TextAlign.center,
                   style: AppTypography.small.copyWith(
                     color: AppColors.mutedOnDark,
                   ),
@@ -464,6 +940,7 @@ class _ExerciseCard extends ConsumerWidget {
               Expanded(
                 child: Text(
                   'Reps',
+                  textAlign: TextAlign.center,
                   style: AppTypography.small.copyWith(
                     color: AppColors.mutedOnDark,
                   ),
@@ -477,6 +954,10 @@ class _ExerciseCard extends ConsumerWidget {
             _SetRow(
               index: i,
               set: entry.sets[i],
+              // The set at the same position last time, if there was one.
+              previousSet: (lastSets != null && i < lastSets.length)
+                  ? lastSets[i]
+                  : null,
               onRemove: entry.sets.length == 1
                   ? null
                   : () {
@@ -501,69 +982,428 @@ class _ExerciseCard extends ConsumerWidget {
         ],
       ),
     );
-  }
 
-  static String _shortSet(WorkoutSet s) {
-    final w = s.weight;
-    final r = s.reps;
-    if (w != null && r != null) return '${trimNumber(w)}×$r';
-    if (w != null) return trimNumber(w);
-    return '${r ?? 0}';
+    // Ring grouped exercises in their shared color so a superset reads as one
+    // unit even between the separate cards.
+    if (supersetColor == null) return card;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AppSpacing.radius),
+        border: Border.all(
+          color: supersetColor!.withValues(alpha: 0.6),
+          width: 2,
+        ),
+      ),
+      child: card,
+    );
   }
 }
 
 class _SetRow extends StatelessWidget {
-  const _SetRow({required this.index, required this.set, this.onRemove});
+  const _SetRow({
+    required this.index,
+    required this.set,
+    required this.previousSet,
+    this.onRemove,
+  });
 
   final int index;
   final _SetEntry set;
+
+  /// What was logged for this set position last time, shown greyed below the
+  /// fields as a reference. Null when there is no matching historical set.
+  final WorkoutSet? previousSet;
   final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
+    final prevWeight = previousSet?.weight;
+    final prevReps = previousSet?.reps;
+
     return Padding(
       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 28,
-            child: Text(
-              '${index + 1}',
-              style: AppTypography.numeric.copyWith(
-                color: AppColors.mutedOnDark,
+          Padding(
+            padding: const EdgeInsets.only(top: AppSpacing.md),
+            child: SizedBox(
+              width: 28,
+              child: Text(
+                '${index + 1}',
+                style: AppTypography.numeric.copyWith(
+                  color: AppColors.mutedOnDark,
+                ),
               ),
             ),
           ),
           Expanded(
-            child: TextField(
+            child: _FieldWithReference(
               controller: set.weightController,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              textAlign: TextAlign.center,
-              decoration: const InputDecoration(isDense: true, hintText: '—'),
+              focusNode: set.weightFocus,
+              reference: prevWeight == null ? null : trimNumber(prevWeight),
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
-            child: TextField(
+            child: _FieldWithReference(
               controller: set.repsController,
-              keyboardType: TextInputType.number,
-              textAlign: TextAlign.center,
-              decoration: const InputDecoration(isDense: true, hintText: '—'),
+              focusNode: set.repsFocus,
+              reference: prevReps?.toString(),
             ),
           ),
           SizedBox(
             width: 40,
-            child: onRemove == null
-                ? null
-                : IconButton(
-                    icon: const Icon(Icons.remove_circle_outline, size: 18),
-                    color: AppColors.mutedOnDark,
-                    onPressed: onRemove,
-                  ),
+            child: Padding(
+              padding: const EdgeInsets.only(top: AppSpacing.sm),
+              // Reacts live to the fields: once a set has reps it reads as done
+              // (a green check); until then it's the remove control.
+              child: ListenableBuilder(
+                listenable: Listenable.merge([
+                  set.weightController,
+                  set.repsController,
+                ]),
+                builder: (context, _) {
+                  final done = set.reps != null;
+                  final Widget content = done
+                      ? const Icon(
+                          Icons.check_circle,
+                          key: ValueKey('done'),
+                          size: 22,
+                          color: AppColors.success,
+                        )
+                      : onRemove != null
+                      ? const Icon(
+                          Icons.remove_circle_outline,
+                          key: ValueKey('remove'),
+                          size: 18,
+                          color: AppColors.mutedOnDark,
+                        )
+                      : const SizedBox.shrink(key: ValueKey('empty'));
+                  final animated = AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    transitionBuilder: (child, anim) => ScaleTransition(
+                      scale: anim,
+                      child: FadeTransition(opacity: anim, child: child),
+                    ),
+                    child: content,
+                  );
+                  // A removable set keeps tap-to-remove on the control; the
+                  // last set's check is a plain (vivid) indicator.
+                  return onRemove == null
+                      ? Center(child: animated)
+                      : IconButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: onRemove,
+                          icon: animated,
+                        );
+                },
+              ),
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A numeric entry field with the previous session's value greyed out beneath
+/// it. The reference line always reserves its height so rows with and without
+/// history stay aligned, and tapping it copies that value into the field.
+///
+/// The field is read-only so the system keyboard never appears — editing is
+/// driven entirely by the in-app [_NumberPad], which the screen shows whenever
+/// one of these holds focus.
+class _FieldWithReference extends StatelessWidget {
+  const _FieldWithReference({
+    required this.controller,
+    required this.focusNode,
+    required this.reference,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final String? reference;
+
+  void _fillFromReference() {
+    final value = reference;
+    if (value == null) return;
+    controller
+      ..text = value
+      ..selection = TextSelection.collapsed(offset: value.length);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        TextField(
+          controller: controller,
+          focusNode: focusNode,
+          readOnly: true,
+          showCursor: true,
+          textAlign: TextAlign.center,
+          // Tapping focuses the field, which brings up the number pad.
+          onTap: () => FocusScope.of(context).requestFocus(focusNode),
+          decoration: const InputDecoration(isDense: true, hintText: '—'),
+        ),
+        const SizedBox(height: 2),
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: reference == null ? null : _fillFromReference,
+          child: Text(
+            // A middle dot keeps the baseline when there is nothing to copy.
+            reference ?? '·',
+            textAlign: TextAlign.center,
+            style: AppTypography.small.copyWith(
+              color: AppColors.mutedOnDark,
+              fontSize: 11,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The running rest countdown, shown above the number pad. Reads out the time
+/// left over a progress bar, with quick adjust and skip controls.
+class _RestBar extends StatelessWidget {
+  const _RestBar({
+    required this.remaining,
+    required this.total,
+    required this.onAdd,
+    required this.onSubtract,
+    required this.onSkip,
+  });
+
+  final int remaining;
+  final int total;
+  final VoidCallback onAdd;
+  final VoidCallback onSubtract;
+  final VoidCallback onSkip;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.cta,
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.sm,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  const Icon(
+                    Icons.timer_outlined,
+                    size: 18,
+                    color: AppColors.primary,
+                  ),
+                  const SizedBox(width: AppSpacing.sm),
+                  Text(
+                    'Rest  ${formatRest(remaining)}',
+                    style: AppTypography.numeric.copyWith(
+                      color: AppColors.onDark,
+                    ),
+                  ),
+                  const Spacer(),
+                  _RestControl(label: '-15', onTap: onSubtract),
+                  const SizedBox(width: AppSpacing.xs),
+                  _RestControl(label: '+15', onTap: onAdd),
+                  const SizedBox(width: AppSpacing.xs),
+                  _RestControl(label: 'Skip', onTap: onSkip, emphasized: true),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: total == 0 ? 0 : remaining / total,
+                  minHeight: 5,
+                  backgroundColor: AppColors.dark,
+                  valueColor: const AlwaysStoppedAnimation(AppColors.primary),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RestControl extends StatelessWidget {
+  const _RestControl({
+    required this.label,
+    required this.onTap,
+    this.emphasized = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      onPressed: onTap,
+      style: TextButton.styleFrom(
+        minimumSize: const Size(0, 32),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+        foregroundColor: emphasized ? AppColors.primary : AppColors.onDark,
+      ),
+      child: Text(label),
+    );
+  }
+}
+
+/// The app's own numeric keypad, shown in place of the system keyboard while a
+/// set field is focused. Its Enter key advances to the next field — the whole
+/// point of a custom pad, since iOS's number pad has no return key.
+class _NumberPad extends StatelessWidget {
+  const _NumberPad({
+    required this.onKey,
+    required this.onBackspace,
+    required this.onEnter,
+    required this.decimalEnabled,
+    required this.isLastField,
+  });
+
+  final void Function(String) onKey;
+  final VoidCallback onBackspace;
+  final VoidCallback onEnter;
+
+  /// Reps are whole numbers, so the decimal key is disabled for them.
+  final bool decimalEnabled;
+
+  /// The Enter key reads "Done" on the workout's final field, since there is
+  /// nothing after it to advance to.
+  final bool isLastField;
+
+  @override
+  Widget build(BuildContext context) {
+    // Keep the pad out of the focus tree so tapping keys never pulls focus off
+    // the active field. Stretch so the tall Enter key fills the pad height.
+    return Focus(
+      canRequestFocus: false,
+      descendantsAreFocusable: false,
+      child: Material(
+        color: AppColors.darkBlue,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.sm),
+            child: SizedBox(
+              height: 240,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: Column(
+                      children: [
+                        _row(['1', '2', '3']),
+                        _row(['4', '5', '6']),
+                        _row(['7', '8', '9']),
+                        Expanded(
+                          child: Row(
+                            children: [
+                              _key(
+                                label: '.',
+                                onTap: decimalEnabled ? () => onKey('.') : null,
+                              ),
+                              _key(label: '0', onTap: () => onKey('0')),
+                              _key(
+                                onTap: onBackspace,
+                                child: const Icon(Icons.backspace_outlined),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: _button(
+                      onTap: onEnter,
+                      background: AppColors.primary,
+                      foreground: AppColors.onPrimary,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.keyboard_return),
+                          const SizedBox(height: AppSpacing.xs),
+                          Text(
+                            isLastField ? 'Done' : 'Next',
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// One row of the digit grid; each key shares the width equally.
+  Widget _row(List<String> labels) => Expanded(
+    child: Row(
+      children: [
+        for (final l in labels) _key(label: l, onTap: () => onKey(l)),
+      ],
+    ),
+  );
+
+  /// A key sized to share its row's width equally.
+  Widget _key({String? label, Widget? child, VoidCallback? onTap}) =>
+      Expanded(child: _button(label: label, child: child, onTap: onTap));
+
+  /// The visual key itself, filling whatever box it is given.
+  Widget _button({
+    String? label,
+    Widget? child,
+    VoidCallback? onTap,
+    Color? background,
+    Color? foreground,
+  }) {
+    final fg = onTap == null
+        ? AppColors.mutedOnDark
+        : (foreground ?? AppColors.onDark);
+    return Padding(
+      padding: const EdgeInsets.all(3),
+      child: Material(
+        color: background ?? AppColors.cta,
+        borderRadius: BorderRadius.circular(AppSpacing.radiusSmall),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppSpacing.radiusSmall),
+          onTap: onTap,
+          child: Center(
+            child: IconTheme(
+              data: IconThemeData(color: fg),
+              child:
+                  child ??
+                  Text(
+                    label ?? '',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w500,
+                      color: fg,
+                    ),
+                  ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -574,12 +1414,21 @@ class _ExerciseEntry {
   _ExerciseEntry({
     required this.exerciseId,
     this.notes,
+    this.supersetGroup,
+    this.restSeconds = 90,
     required List<_SetEntry> sets,
   }) : sets = List.of(sets);
 
   final int exerciseId;
   final String? notes;
   final List<_SetEntry> sets;
+
+  /// Group id shared with other exercises supersetted with this one; null when
+  /// standalone. Mutable — set and cleared by the superset menu actions.
+  int? supersetGroup;
+
+  /// Rest between sets, in seconds (0 = off). Mutable — set via the rest chip.
+  int restSeconds;
 
   void dispose() {
     for (final s in sets) {
@@ -601,6 +1450,8 @@ class _SetEntry {
 
   final TextEditingController weightController;
   final TextEditingController repsController;
+  final FocusNode weightFocus = FocusNode();
+  final FocusNode repsFocus = FocusNode();
 
   double? get weight => double.tryParse(weightController.text.trim());
 
@@ -611,5 +1462,7 @@ class _SetEntry {
   void dispose() {
     weightController.dispose();
     repsController.dispose();
+    weightFocus.dispose();
+    repsFocus.dispose();
   }
 }

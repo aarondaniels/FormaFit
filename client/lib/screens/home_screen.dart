@@ -33,45 +33,59 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       extendBody: true,
-      extendBodyBehindAppBar: true,
-      appBar: GlassAppBar(
-        title: Text(_titles[_index]),
-        actions: [
-          if (_index == 3)
-            GlassIconButton(
-              icon: const Icon(Icons.straighten),
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => const MeasurementsScreen(),
-                ),
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            // The large title shares its row with the glass action buttons.
+            LargeTitle(
+              _titles[_index],
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_index == 3) ...[
+                    GlassIconButton(
+                      icon: const Icon(Icons.straighten),
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const MeasurementsScreen(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                  ],
+                  GlassIconButton(
+                    icon: const Icon(Icons.add),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const LogWorkoutScreen(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.sm),
+                  GlassIconButton(
+                    icon: const Icon(Icons.settings_outlined),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const SettingsScreen(),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-          GlassIconButton(
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
+            Expanded(
+              child: IndexedStack(
+                index: _index,
+                children: const [
+                  DashboardScreen(),
+                  ExerciseLibraryScreen(),
+                  FolderListScreen(),
+                  AnalyticsScreen(),
+                ],
+              ),
             ),
-          ),
-        ],
-      ),
-      body: IndexedStack(
-        index: _index,
-        children: const [
-          DashboardScreen(),
-          ExerciseLibraryScreen(),
-          FolderListScreen(),
-          AnalyticsScreen(),
-        ],
-      ),
-      floatingActionButton: Padding(
-        // Lift the button clear of the floating tab bar.
-        padding: EdgeInsets.only(bottom: glassBottomInset(context) - 56),
-        child: FloatingActionButton.extended(
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const LogWorkoutScreen()),
-          ),
-          icon: const Icon(Icons.add),
-          label: const Text('Log workout'),
+          ],
         ),
       ),
       bottomNavigationBar: GlassTabBar.bottom(

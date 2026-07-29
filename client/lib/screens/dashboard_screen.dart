@@ -6,6 +6,7 @@ import '../models.dart';
 import '../providers.dart';
 import '../theme/tokens.dart';
 import '../widgets/glass.dart';
+import 'workout/log_workout_screen.dart';
 import 'workout/workout_detail_screen.dart';
 
 class DashboardScreen extends ConsumerWidget {
@@ -25,30 +26,20 @@ class DashboardScreen extends ConsumerWidget {
           onRetry: () => ref.read(storeRevisionProvider.notifier).bump(),
         ),
         data: (s) {
-          if (s.totalWorkouts == 0) {
-            return ListView(
-              padding: glassPagePadding(context),
-              children: const [
-                SizedBox(height: 80),
-                EmptyState(
-                  icon: Icons.fitness_center,
-                  title: 'No workouts yet',
-                  message:
-                      'Tap “Log workout” to record your first session. '
-                      'Everything stays on this device.',
-                ),
-              ],
-            );
-          }
-
           return ListView(
-            padding: glassPagePadding(context),
+            padding: glassContentPadding(context),
             children: [
-              _SummaryGrid(stats: s),
+              const _StartWorkoutCta(),
               const SizedBox(height: AppSpacing.lg),
-              const _RecoverySection(),
-              const SizedBox(height: AppSpacing.lg),
-              _RecentWorkouts(workouts: workouts),
+              if (s.totalWorkouts == 0)
+                const _FirstSessionNote()
+              else ...[
+                _StatTrio(stats: s),
+                const SizedBox(height: AppSpacing.lg),
+                const _RecoverySection(),
+                const SizedBox(height: AppSpacing.lg),
+                _RecentWorkouts(workouts: workouts),
+              ],
             ],
           );
         },
@@ -57,48 +48,141 @@ class DashboardScreen extends ConsumerWidget {
   }
 }
 
-class _SummaryGrid extends StatelessWidget {
-  const _SummaryGrid({required this.stats});
+/// Primary call-to-action at the top of the home tab.
+class _StartWorkoutCta extends StatelessWidget {
+  const _StartWorkoutCta();
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppSpacing.radius),
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const LogWorkoutScreen()),
+        ),
+        child: Ink(
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [AppColors.primary, AppColors.activeCTA],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(AppSpacing.radius),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            child: Row(
+              children: [
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.18),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.fitness_center,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Start a workout',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Log a new session',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.white.withValues(alpha: 0.85),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.arrow_forward, color: Colors.white),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The home tab's headline trifecta: total workouts, this week, week streak.
+/// Values stay in ink; the icons carry the accent (the streak's flame is the
+/// warm, motivational one).
+class _StatTrio extends StatelessWidget {
+  const _StatTrio({required this.stats});
 
   final WorkoutStats stats;
 
   @override
   Widget build(BuildContext context) {
-    final hours = stats.totalDuration / 3600;
-    return GlassSection(
-      title: 'At a glance',
-      child: GridView.count(
-        crossAxisCount: 2,
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        childAspectRatio: 2.1,
-        crossAxisSpacing: AppSpacing.md,
-        mainAxisSpacing: AppSpacing.md,
+    return GlassCard(
+      padding: const EdgeInsets.symmetric(
+        vertical: AppSpacing.lg,
+        horizontal: AppSpacing.sm,
+      ),
+      child: Row(
         children: [
-          StatTile(
+          StatCell(
+            value: '${stats.totalWorkouts}',
+            label: 'Total workouts',
+            icon: Icons.fitness_center,
+            color: AppColors.primary,
+          ),
+          const CellDivider(),
+          StatCell(
             value: '${stats.workoutsThisWeek}',
             label: 'This week',
             icon: Icons.calendar_today,
+            color: AppColors.success,
           ),
-          StatTile(
+          const CellDivider(),
+          StatCell(
             value: '${stats.weekStreak}',
-            label: stats.weekStreak == 1 ? 'Week streak' : 'Week streak',
+            label: 'Week streak',
             icon: Icons.local_fire_department,
             color: AppColors.accent,
           ),
-          StatTile(
-            value: compactNumber(stats.totalVolume),
-            label: 'Total volume (lb)',
-            icon: Icons.scale,
-            color: AppColors.success,
-          ),
-          StatTile(
-            value: hours >= 1
-                ? '${hours.toStringAsFixed(1)}h'
-                : '${(stats.totalDuration / 60).round()}m',
-            label: 'Time trained',
-            icon: Icons.timer_outlined,
-            color: AppColors.warning,
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown on the home tab before any workout is logged.
+class _FirstSessionNote extends StatelessWidget {
+  const _FirstSessionNote();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.xl),
+      child: Column(
+        children: [
+          const Icon(Icons.fitness_center, size: 48, color: AppColors.cta),
+          const SizedBox(height: AppSpacing.md),
+          Text('No workouts yet', style: AppTypography.h4),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            'Tap “Start a workout” above to log your first session. '
+            'Everything stays on this device.',
+            textAlign: TextAlign.center,
+            style: AppTypography.caption.copyWith(color: AppColors.mutedOnDark),
           ),
         ],
       ),

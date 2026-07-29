@@ -35,7 +35,7 @@ class AnalyticsScreen extends ConsumerWidget {
         }
 
         return ListView(
-          padding: glassPagePadding(context),
+          padding: glassContentPadding(context),
           children: [
             _Totals(stats: s),
             const SizedBox(height: AppSpacing.lg),
@@ -82,51 +82,53 @@ class _Totals extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hours = stats.totalDuration / 3600;
+    final time = hours >= 1
+        ? '${hours.toStringAsFixed(1)}h'
+        : '${(stats.totalDuration / 60).round()}m';
+
+    // The aggregates that only live on Progress — Workouts/streak/this-week
+    // are the Home trifecta's job. One calm accent, numbers in ink.
     return GlassSection(
       title: 'Totals',
-      child: GridView.count(
-        crossAxisCount: 2,
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        childAspectRatio: 2.1,
-        crossAxisSpacing: AppSpacing.md,
-        mainAxisSpacing: AppSpacing.md,
+      child: Column(
         children: [
-          StatTile(
-            value: '${stats.totalWorkouts}',
-            label: 'Workouts',
-            icon: Icons.event_available,
+          Row(
+            children: [
+              StatCell(
+                value: compactNumber(stats.totalVolume),
+                label: 'Volume (lb)',
+                icon: Icons.scale,
+                color: AppColors.primary,
+              ),
+              const CellDivider(),
+              StatCell(
+                value: '${stats.totalSets}',
+                label: 'Sets',
+                icon: Icons.repeat,
+                color: AppColors.primary,
+              ),
+            ],
           ),
-          StatTile(
-            value: '${stats.totalSets}',
-            label: 'Sets',
-            icon: Icons.repeat,
-            color: AppColors.success,
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: AppSpacing.md),
+            child: Divider(height: 1),
           ),
-          StatTile(
-            value: compactNumber(stats.totalVolume),
-            label: 'Volume (lb)',
-            icon: Icons.scale,
-            color: AppColors.warning,
-          ),
-          StatTile(
-            value: hours >= 1
-                ? '${hours.toStringAsFixed(1)}h'
-                : '${(stats.totalDuration / 60).round()}m',
-            label: 'Time trained',
-            icon: Icons.timer_outlined,
-            color: AppColors.accent,
-          ),
-          StatTile(
-            value: stats.averageEffort.toStringAsFixed(1),
-            label: 'Avg effort (1–10)',
-            icon: Icons.bolt,
-          ),
-          StatTile(
-            value: '${stats.workoutsThisMonth}',
-            label: 'This month',
-            icon: Icons.calendar_month,
-            color: AppColors.success,
+          Row(
+            children: [
+              StatCell(
+                value: time,
+                label: 'Time trained',
+                icon: Icons.timer_outlined,
+                color: AppColors.primary,
+              ),
+              const CellDivider(),
+              StatCell(
+                value: stats.averageEffort.toStringAsFixed(1),
+                label: 'Avg effort',
+                icon: Icons.bolt,
+                color: AppColors.primary,
+              ),
+            ],
           ),
         ],
       ),

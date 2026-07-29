@@ -6,6 +6,7 @@ import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
+import '../../widgets/rest.dart';
 import '../dashboard_screen.dart' show compactNumber;
 import '../exercise_detail_screen.dart' show formatSet;
 import 'log_workout_screen.dart';
@@ -47,6 +48,7 @@ class WorkoutDetailScreen extends ConsumerWidget {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: GlassAppBar(
+        leading: const GlassBackButton(),
         title: const Text('Workout'),
         actions: [
           GlassIconButton(
@@ -170,14 +172,51 @@ class _ExerciseBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GlassCard(
+    final supersetColor = exercise.supersetGroup == null
+        ? null
+        : AppColors.forSuperset(exercise.supersetGroup!);
+
+    final card = GlassCard(
       padding: const EdgeInsets.all(AppSpacing.md),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (supersetColor != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+              child: Row(
+                children: [
+                  Icon(Icons.link, size: 14, color: supersetColor),
+                  const SizedBox(width: AppSpacing.xs),
+                  Text(
+                    'Superset',
+                    style: AppTypography.small.copyWith(
+                      color: supersetColor,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Row(
             children: [
               Expanded(child: Text(name, style: AppTypography.h5)),
+              if (exercise.restSeconds > 0) ...[
+                const Icon(
+                  Icons.timer_outlined,
+                  size: 13,
+                  color: AppColors.mutedOnDark,
+                ),
+                const SizedBox(width: 2),
+                Text(
+                  formatRest(exercise.restSeconds),
+                  style: AppTypography.small.copyWith(
+                    color: AppColors.mutedOnDark,
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+              ],
               Text(
                 '${exercise.volume.round()} lb',
                 style: AppTypography.small.copyWith(
@@ -217,6 +256,18 @@ class _ExerciseBlock extends StatelessWidget {
           ],
         ],
       ),
+    );
+
+    if (supersetColor == null) return card;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AppSpacing.radius),
+        border: Border.all(
+          color: supersetColor.withValues(alpha: 0.6),
+          width: 2,
+        ),
+      ),
+      child: card,
     );
   }
 }

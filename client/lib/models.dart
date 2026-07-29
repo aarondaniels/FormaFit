@@ -187,11 +187,22 @@ class WorkoutExercise {
   final String? notes;
   final List<WorkoutSet> sets;
 
+  /// Exercises sharing a non-null [supersetGroup] within one workout are a
+  /// superset — performed back-to-back. The value is only an identifier for
+  /// grouping; it carries no order of its own.
+  final int? supersetGroup;
+
+  /// Rest to take between this exercise's sets, in seconds. 0 means no rest
+  /// timer.
+  final int restSeconds;
+
   WorkoutExercise({
     required this.id,
     required this.exerciseId,
     this.notes,
     required this.sets,
+    this.supersetGroup,
+    this.restSeconds = 0,
   });
 
   factory WorkoutExercise.fromJson(Map<String, dynamic> j) => WorkoutExercise(
@@ -201,6 +212,8 @@ class WorkoutExercise {
     sets: (j['sets'] as List? ?? [])
         .map((e) => WorkoutSet.fromJson(e as Map<String, dynamic>))
         .toList(),
+    supersetGroup: j['superset_group'] as int?,
+    restSeconds: j['rest_seconds'] as int? ?? 0,
   );
 
   Map<String, dynamic> toJson() => {
@@ -208,6 +221,8 @@ class WorkoutExercise {
     'exercise_id': exerciseId,
     'notes': notes,
     'sets': sets.map((s) => s.toJson()).toList(),
+    'superset_group': supersetGroup,
+    'rest_seconds': restSeconds,
   };
 
   WorkoutExercise copyWith({
@@ -215,11 +230,15 @@ class WorkoutExercise {
     int? exerciseId,
     String? notes,
     List<WorkoutSet>? sets,
+    int? supersetGroup,
+    int? restSeconds,
   }) => WorkoutExercise(
     id: id ?? this.id,
     exerciseId: exerciseId ?? this.exerciseId,
     notes: notes ?? this.notes,
     sets: sets ?? this.sets,
+    supersetGroup: supersetGroup ?? this.supersetGroup,
+    restSeconds: restSeconds ?? this.restSeconds,
   );
 
   double get volume => sets.fold(0.0, (sum, s) => sum + s.volume);
@@ -377,12 +396,17 @@ class TemplateExercise {
   final double? defaultWeight;
   final int? defaultReps;
 
+  /// Rest between sets, in seconds, carried into a workout started from the
+  /// template. 0 means no rest timer.
+  final int restSeconds;
+
   TemplateExercise({
     required this.exerciseId,
     required this.order,
     required this.defaultSets,
     this.defaultWeight,
     this.defaultReps,
+    this.restSeconds = 90,
   });
 
   factory TemplateExercise.fromJson(Map<String, dynamic> j) => TemplateExercise(
@@ -391,6 +415,8 @@ class TemplateExercise {
     defaultSets: j['default_sets'] as int,
     defaultWeight: (j['default_weight'] as num?)?.toDouble(),
     defaultReps: j['default_reps'] as int?,
+    // Templates predating rest timers default to a sensible 90s.
+    restSeconds: j['rest_seconds'] as int? ?? 90,
   );
 
   Map<String, dynamic> toJson() => {
@@ -399,6 +425,7 @@ class TemplateExercise {
     'default_sets': defaultSets,
     'default_weight': defaultWeight,
     'default_reps': defaultReps,
+    'rest_seconds': restSeconds,
   };
 
   TemplateExercise copyWith({
@@ -407,12 +434,14 @@ class TemplateExercise {
     int? defaultSets,
     double? defaultWeight,
     int? defaultReps,
+    int? restSeconds,
   }) => TemplateExercise(
     exerciseId: exerciseId ?? this.exerciseId,
     order: order ?? this.order,
     defaultSets: defaultSets ?? this.defaultSets,
     defaultWeight: defaultWeight ?? this.defaultWeight,
     defaultReps: defaultReps ?? this.defaultReps,
+    restSeconds: restSeconds ?? this.restSeconds,
   );
 }
 
@@ -675,11 +704,16 @@ class ExerciseProgress {
   /// Estimated one-rep max per session (Epley), oldest first.
   final List<TimePoint> estimatedOneRepMax;
 
+  /// Total reps per session, oldest first — the progression signal for
+  /// bodyweight/rep-based work that has no weight to chart.
+  final List<TimePoint> reps;
+
   ExerciseProgress({
     required this.exerciseId,
     required this.exerciseName,
     required this.topWeight,
     required this.volume,
     required this.estimatedOneRepMax,
+    required this.reps,
   });
 }

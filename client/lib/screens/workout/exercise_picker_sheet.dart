@@ -5,6 +5,7 @@ import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
+import '../exercise_form_screen.dart';
 
 /// Multi-select exercise picker. Returns the chosen ids in tap order, or null
 /// if dismissed.
@@ -28,6 +29,21 @@ class _SheetState extends ConsumerState<_ExercisePickerSheet> {
   String _query = '';
   String? _group;
 
+  /// Opens the exercise form pre-filled with the search text; if the user
+  /// saves, the new exercise is selected so it joins the workout/template.
+  Future<void> _createAndSelect() async {
+    final name = _query.trim();
+    if (name.isEmpty) return;
+    final created = await Navigator.of(context).push<Exercise>(
+      MaterialPageRoute(
+        builder: (_) => ExerciseFormScreen(initialName: name),
+      ),
+    );
+    if (created != null && mounted) {
+      setState(() => _selected.add(created.id));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final exercises = ref.watch(exercisesProvider).value ?? const [];
@@ -38,6 +54,13 @@ class _SheetState extends ConsumerState<_ExercisePickerSheet> {
       if (_query.isEmpty) return true;
       return e.name.toLowerCase().contains(_query.toLowerCase());
     }).toList();
+
+    // Offer to create the searched exercise when nothing matches it exactly.
+    final trimmed = _query.trim();
+    final hasExactMatch = exercises.any(
+      (e) => e.name.toLowerCase() == trimmed.toLowerCase(),
+    );
+    final showCreate = trimmed.isNotEmpty && !hasExactMatch;
 
     return DraggableScrollableSheet(
       expand: false,
@@ -107,17 +130,47 @@ class _SheetState extends ConsumerState<_ExercisePickerSheet> {
             ),
           Expanded(
             child: filtered.isEmpty
-                ? const EmptyState(
-                    icon: Icons.search_off,
-                    title: 'No matches',
-                    message: 'Try a different search or filter.',
-                  )
+                ? (showCreate
+                      ? EmptyState(
+                          icon: Icons.add_circle_outline,
+                          title: 'No matching exercise',
+                          message:
+                              'Create “$trimmed” and add it right here.',
+                          action: FilledButton.icon(
+                            onPressed: _createAndSelect,
+                            icon: const Icon(Icons.add),
+                            label: Text('Create “$trimmed”'),
+                          ),
+                        )
+                      : const EmptyState(
+                          icon: Icons.search_off,
+                          title: 'No matches',
+                          message: 'Try a different search or filter.',
+                        ))
                 : ListView.builder(
                     controller: scrollController,
                     padding: const EdgeInsets.only(bottom: AppSpacing.xl),
-                    itemCount: filtered.length,
+                    itemCount: filtered.length + (showCreate ? 1 : 0),
                     itemBuilder: (_, i) {
-                      final e = filtered[i];
+                      // A create row leads the list when the search has no
+                      // exact match, so a new exercise is one tap away.
+                      if (showCreate && i == 0) {
+                        return ListTile(
+                          leading: const Icon(
+                            Icons.add_circle,
+                            color: AppColors.primary,
+                          ),
+                          title: Text('Create “$trimmed”'),
+                          subtitle: Text(
+                            'New exercise',
+                            style: AppTypography.small.copyWith(
+                              color: AppColors.mutedOnDark,
+                            ),
+                          ),
+                          onTap: _createAndSelect,
+                        );
+                      }
+                      final e = filtered[i - (showCreate ? 1 : 0)];
                       final index = _selected.indexOf(e.id);
                       return _PickerRow(
                         exercise: e,

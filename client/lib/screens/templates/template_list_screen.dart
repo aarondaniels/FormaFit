@@ -5,6 +5,7 @@ import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
+import '../workout/log_workout_screen.dart';
 import 'folder_list_screen.dart' show promptForName;
 import 'template_editor_screen.dart';
 
@@ -20,6 +21,7 @@ class TemplateListScreen extends ConsumerWidget {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: GlassAppBar(
+        leading: const GlassBackButton(),
         title: Text(folder.name),
         actions: [
           GlassIconButton(
@@ -93,6 +95,17 @@ class _TemplateCard extends ConsumerWidget {
         contentPadding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.md,
           vertical: AppSpacing.sm,
+        ),
+        // Tapping the play button starts a workout from the template; tapping
+        // the rest of the row opens it for editing.
+        leading: IconButton.filled(
+          icon: const Icon(Icons.play_arrow),
+          tooltip: 'Start workout',
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => LogWorkoutScreen(fromTemplate: template),
+            ),
+          ),
         ),
         title: Text(template.name, style: AppTypography.h6),
         subtitle: Text(

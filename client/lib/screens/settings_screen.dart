@@ -1,6 +1,4 @@
-import 'dart:io';
-
-import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
@@ -74,16 +72,101 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     setState(() => _busy = true);
     try {
-      final picked = await FilePicker.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['json'],
+      final file = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(
+            label: 'JSON backup',
+            extensions: ['json'],
+            uniformTypeIdentifiers: ['public.json'],
+          ),
+        ],
       );
-      final path = picked?.files.single.path;
-      if (path == null) return;
+      if (file == null) return;
 
-      final json = await File(path).readAsString();
+      final json = await file.readAsString();
       await mutateWith(ref, (api) => api.importJson(json));
       _report('Backup restored.');
+    } on ImportException catch (e) {
+      _report(e.message);
+    } catch (e) {
+      _report('Import failed: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _exportCsv() async {
+    setState(() => _busy = true);
+    try {
+      final file = await ref.read(apiProvider).exportWorkoutsCsvToFile();
+      if (!mounted) return;
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'text/csv')],
+          subject: 'Forma workout log',
+        ),
+      );
+    } catch (e) {
+      _report('Export failed: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _importCsv() async {
+    // Pick the file first, then ask what unit its weights are in — the CSV
+    // carries no unit marker.
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(
+          label: 'CSV',
+          extensions: ['csv', 'txt'],
+          uniformTypeIdentifiers: [
+            'public.comma-separated-values-text',
+            'public.plain-text',
+          ],
+        ),
+      ],
+    );
+    if (file == null || !mounted) return;
+
+    final kg = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Weight units'),
+        content: const Text(
+          'The file has no unit marker, so pick the unit its weights are in.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Pounds (lb)'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Kilograms (kg)'),
+          ),
+        ],
+      ),
+    );
+    if (kg == null || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      final csv = await file.readAsString();
+      final result = await mutateWith(
+        ref,
+        (api) => api.importWorkoutsCsv(csv, weightsInKg: kg),
+      );
+      final extras = result.exercisesCreated == 0
+          ? ''
+          : ' · ${result.exercisesCreated} new '
+                '${result.exercisesCreated == 1 ? "exercise" : "exercises"}';
+      _report(
+        'Imported ${result.workouts} '
+        '${result.workouts == 1 ? "workout" : "workouts"} '
+        '(${result.sets} sets)$extras.',
+      );
     } on ImportException catch (e) {
       _report(e.message);
     } catch (e) {
@@ -156,7 +239,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     return Scaffold(
       extendBodyBehindAppBar: true,
-      appBar: const GlassAppBar(title: Text('Settings')),
+      appBar: const GlassAppBar(
+        leading: GlassBackButton(),
+        // Same bold, left-aligned language as the main tab titles, a step down
+        // in size so it stays subordinate to them.
+        centerTitle: false,
+        title: Text(
+          'Settings',
+          style: TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.w800,
+            color: AppColors.onDark,
+            letterSpacing: -0.3,
+          ),
+        ),
+      ),
       body: ListView(
         padding: glassPagePadding(context),
         children: [
@@ -195,15 +292,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const SizedBox(height: AppSpacing.lg),
           GlassSection(
-            title: 'Backup',
+            title: 'Workout log (CSV)',
             child: Column(
               children: [
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.ios_share),
-                  title: const Text('Export a backup'),
+                  title: const Text('Export workout log'),
                   subtitle: Text(
-                    'Save or send a JSON copy of everything.',
+                    'A CSV of every set — for spreadsheets or another app.',
+                    style: AppTypography.small.copyWith(
+                      color: AppColors.mutedOnDark,
+                    ),
+                  ),
+                  onTap: _busy ? null : _exportCsv,
+                ),
+                const Divider(),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.upload_file_outlined),
+                  title: const Text('Import from CSV'),
+                  subtitle: Text(
+                    'Add workouts from a CSV export. Adds to your log; '
+                    'nothing is overwritten.',
+                    style: AppTypography.small.copyWith(
+                      color: AppColors.mutedOnDark,
+                    ),
+                  ),
+                  onTap: _busy ? null : _importCsv,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          GlassSection(
+            title: 'Full backup (JSON)',
+            child: Column(
+              children: [
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.save_alt),
+                  title: const Text('Export full backup'),
+                  subtitle: Text(
+                    'Everything — workouts, templates, measurements — as JSON.',
                     style: AppTypography.small.copyWith(
                       color: AppColors.mutedOnDark,
                     ),
@@ -214,7 +345,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.download_outlined),
-                  title: const Text('Restore from backup'),
+                  title: const Text('Restore full backup'),
                   subtitle: Text(
                     'Replaces everything currently in the app.',
                     style: AppTypography.small.copyWith(

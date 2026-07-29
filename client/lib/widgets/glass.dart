@@ -31,6 +31,85 @@ EdgeInsets glassPagePadding(BuildContext context) => EdgeInsets.fromLTRB(
   glassBottomInset(context),
 );
 
+/// Page padding for a root tab whose top inset and [LargeTitle] are supplied by
+/// the surrounding scaffold — no top inset here, only bottom clearance for the
+/// floating tab bar.
+EdgeInsets glassContentPadding(BuildContext context) => EdgeInsets.fromLTRB(
+  AppSpacing.md,
+  AppSpacing.sm,
+  AppSpacing.md,
+  glassBottomInset(context),
+);
+
+/// Back / dismiss control for a pushed screen's [GlassAppBar].
+///
+/// Unlike Material's [AppBar], [GlassAppBar] never synthesizes a leading back
+/// button — its `leading` is null unless one is passed — so every pushed route
+/// must supply this explicitly or it strands the user with only the iOS
+/// edge-swipe gesture and no visible way out.
+///
+/// Uses [Navigator.maybePop] so screens that guard dismissal with a [PopScope]
+/// (e.g. an unsaved-workout confirmation) still get their prompt.
+class GlassBackButton extends StatelessWidget {
+  const GlassBackButton({super.key, this.icon = Icons.arrow_back});
+
+  /// [Icons.arrow_back] for navigational pushes; pass [Icons.close] for
+  /// task/editor screens that read as modal.
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassIconButton(
+      icon: Icon(icon),
+      onPressed: () => Navigator.of(context).maybePop(),
+    );
+  }
+}
+
+/// A large, bold, left-aligned screen title in the iOS large-title style,
+/// used at the top of each root tab. Pushed detail screens keep the centered
+/// [GlassAppBar] title instead, matching native iOS.
+class LargeTitle extends StatelessWidget {
+  const LargeTitle(this.text, {super.key, this.trailing});
+
+  final String text;
+
+  /// Optional trailing control aligned to the title's baseline.
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.md,
+        AppSpacing.sm,
+        AppSpacing.md,
+        AppSpacing.sm,
+      ),
+      child: Row(
+        // Center so tall trailing controls (the glass action buttons) line up
+        // with the title.
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontSize: 32,
+                fontWeight: FontWeight.w800,
+                color: AppColors.onDark,
+                letterSpacing: -0.5,
+                height: 1.1,
+              ),
+            ),
+          ),
+          ?trailing,
+        ],
+      ),
+    );
+  }
+}
+
 /// A titled group of content on a glass card, the app's default section shape.
 class GlassSection extends StatelessWidget {
   const GlassSection({
@@ -68,6 +147,63 @@ class GlassSection extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// A centered KPI cell — icon, big value, muted label — for a stat grid.
+///
+/// Wraps itself in [Expanded] so it shares width evenly inside a Row (a KPI
+/// row, or one row of a grid). Values use the font's proportional figures, so
+/// a standalone headline number doesn't look loose.
+class StatCell extends StatelessWidget {
+  const StatCell({
+    super.key,
+    required this.value,
+    required this.label,
+    required this.icon,
+    required this.color,
+  });
+
+  final String value;
+  final String label;
+  final IconData icon;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Column(
+        children: [
+          Icon(icon, size: 20, color: color),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.w700,
+              color: AppColors.onDark,
+              height: 1.0,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            label,
+            textAlign: TextAlign.center,
+            style: AppTypography.small.copyWith(color: AppColors.mutedOnDark),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A hairline vertical rule between [StatCell]s in a KPI row.
+class CellDivider extends StatelessWidget {
+  const CellDivider({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(width: 1, height: 44, color: AppColors.cta);
   }
 }
 

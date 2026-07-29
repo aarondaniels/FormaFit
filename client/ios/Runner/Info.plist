@@ -82,5 +82,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- The app has no networking or custom cryptography, so it's exempt from
+	     export-compliance encryption rules; this skips the per-upload prompt. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

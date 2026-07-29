@@ -9,6 +9,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:csv/csv.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'data/default_library.dart';
@@ -51,6 +52,63 @@ const int _fatigueWindowDays = 7;
 
 /// Sessions per group per week that read as a full fatigue load.
 const int _fatigueSaturationSessions = 4;
+
+/// Equipment words that Strong appends in parentheses ("Bench Press
+/// (Barbell)") and that Forma bakes into names ("Barbell Bench Press"). Pulled
+/// out of the name so the two styles match on the movement itself.
+const Set<String> _equipmentWords = {
+  'barbell',
+  'dumbbell',
+  'cable',
+  'machine',
+  'bodyweight',
+  'kettlebell',
+  'band',
+  'resistance',
+  'smith',
+  'ez',
+  'plate',
+  'weighted',
+  'assisted',
+  'lever',
+  'sled',
+  'trap',
+  'hex',
+};
+
+/// Strips a simple trailing plural so "Squats"/"Squat" and "Curls"/"Curl"
+/// collapse together. Leaves "press", "-us" words and short words alone.
+String _stemPlural(String w) {
+  // > 2 so 3-letter plurals like "ups" (Pull-ups) reduce to "up". Applied to
+  // both library and imported names, so it only has to be consistent.
+  if (w.length > 2 &&
+      w.endsWith('s') &&
+      !w.endsWith('ss') &&
+      !w.endsWith('us')) {
+    return w.substring(0, w.length - 1);
+  }
+  return w;
+}
+
+/// Normalizes an exercise name to a `(base, equipment)` pair so names in
+/// Strong's "Movement (Equipment)" form match Forma's "Equipment Movement"
+/// form. The base is order-independent (sorted, de-pluralized movement words);
+/// equipment is kept aside to disambiguate variants that share a base.
+({String base, Set<String> equipment}) _normalizeExerciseName(String name) {
+  final words = name
+      .toLowerCase()
+      .replaceAll(RegExp(r'[()]'), ' ')
+      .split(RegExp(r'[^a-z0-9]+'))
+      .where((w) => w.isNotEmpty)
+      .map(_stemPlural);
+  final base = <String>{};
+  final equipment = <String>{};
+  for (final w in words) {
+    (_equipmentWords.contains(w) ? equipment : base).add(w);
+  }
+  final sortedBase = base.toList()..sort();
+  return (base: sortedBase.join(' '), equipment: equipment);
+}
 
 /// Raised when an import file can't be used, so the UI can explain why
 /// instead of surfacing a decode error.
@@ -249,6 +307,86 @@ class ApiClient {
     });
   }
 
+  /// Consolidates a duplicate exercise into another: moves every logged set and
+  /// template reference from [sourceId] onto [targetId], then removes the
+  /// source. Where a single workout ends up with the target exercise twice its
+  /// sets are combined into one entry; a template that ends up referencing it
+  /// twice keeps the first reference.
+  Future<void> mergeExercise({
+    required int sourceId,
+    required int targetId,
+  }) {
+    return _mutate(() async {
+      final data = await _load();
+      if (sourceId == targetId) return;
+      if (!data.exercises.any((e) => e.id == targetId)) {
+        throw StateError('No target exercise $targetId');
+      }
+
+      for (var i = 0; i < data.workouts.length; i++) {
+        final w = data.workouts[i];
+        if (!w.exercises.any((we) => we.exerciseId == sourceId)) continue;
+        final repointed = [
+          for (final we in w.exercises)
+            we.exerciseId == sourceId
+                ? we.copyWith(exerciseId: targetId)
+                : we,
+        ];
+        data.workouts[i] = w.copyWith(
+          exercises: _mergeSameExercise(repointed),
+        );
+      }
+
+      for (var i = 0; i < data.templates.length; i++) {
+        final t = data.templates[i];
+        if (!t.exercises.any((te) => te.exerciseId == sourceId)) continue;
+        final repointed = [
+          for (final te in t.exercises)
+            te.exerciseId == sourceId
+                ? te.copyWith(exerciseId: targetId)
+                : te,
+        ];
+        final seen = <int>{};
+        final kept = [
+          for (final te in repointed)
+            if (seen.add(te.exerciseId)) te,
+        ];
+        data.templates[i] = t.copyWith(exercises: _reorder(kept));
+      }
+
+      data.exercises.removeWhere((e) => e.id == sourceId);
+      await _persist();
+    });
+  }
+
+  /// Folds workout-exercise entries that share an exercise id into one, in
+  /// first-seen order, concatenating and renumbering their sets.
+  static List<WorkoutExercise> _mergeSameExercise(List<WorkoutExercise> list) {
+    final order = <int>[];
+    final byId = <int, WorkoutExercise>{};
+    for (final we in list) {
+      final existing = byId[we.exerciseId];
+      if (existing == null) {
+        order.add(we.exerciseId);
+        byId[we.exerciseId] = we;
+      } else {
+        byId[we.exerciseId] = existing.copyWith(
+          sets: [...existing.sets, ...we.sets],
+          notes: existing.notes ?? we.notes,
+        );
+      }
+    }
+    return [
+      for (final id in order)
+        byId[id]!.copyWith(
+          sets: [
+            for (var (i, s) in byId[id]!.sets.indexed)
+              s.copyWith(setNumber: i + 1),
+          ],
+        ),
+    ];
+  }
+
   /// Re-adds any seeded exercises the user deleted, leaving their own entries
   /// and any edits to surviving seeds untouched.
   Future<int> restoreDefaultExercises() {
@@ -364,6 +502,8 @@ class ApiClient {
         id: data.nextWorkoutExerciseId++,
         exerciseId: d.exerciseId,
         notes: d.notes,
+        supersetGroup: d.supersetGroup,
+        restSeconds: d.restSeconds,
         sets: d.sets
             .map(
               (s) => WorkoutSet(
@@ -669,6 +809,7 @@ class ApiClient {
     final topWeight = <TimePoint>[];
     final volume = <TimePoint>[];
     final oneRepMax = <TimePoint>[];
+    final reps = <TimePoint>[];
 
     final sorted = [...data.workouts]..sort((a, b) => a.date.compareTo(b.date));
     for (final w in sorted) {
@@ -679,6 +820,8 @@ class ApiClient {
         if (we.volume > 0) volume.add(TimePoint(w.date, we.volume));
         final orm = _bestOneRepMax(we.sets);
         if (orm != null) oneRepMax.add(TimePoint(w.date, orm));
+        final totalReps = we.sets.fold<int>(0, (sum, s) => sum + (s.reps ?? 0));
+        if (totalReps > 0) reps.add(TimePoint(w.date, totalReps.toDouble()));
       }
     }
 
@@ -688,6 +831,7 @@ class ApiClient {
       topWeight: List.unmodifiable(topWeight),
       volume: List.unmodifiable(volume),
       estimatedOneRepMax: List.unmodifiable(oneRepMax),
+      reps: List.unmodifiable(reps),
     );
   }
 
@@ -905,6 +1049,262 @@ class ApiClient {
     return file;
   }
 
+  // -------------------------------------------------------------------------
+  // CSV — workout log interchange (Strong-compatible, one row per set)
+  // -------------------------------------------------------------------------
+
+  /// The workout log as CSV, one row per set. Lossy by nature — templates,
+  /// measurements, supersets and rest aren't represented — but portable to
+  /// spreadsheets and other trackers. Weights are in pounds.
+  Future<String> exportWorkoutsCsv() async {
+    final data = await _load();
+    final byId = {for (final e in data.exercises) e.id: e};
+    final rows = <List<Object?>>[
+      [
+        'Date',
+        'Workout Name',
+        'Exercise Name',
+        'Set Order',
+        'Weight (lb)',
+        'Reps',
+        'Effort',
+        'Set Notes',
+        'Workout Notes',
+      ],
+    ];
+    final workouts = [...data.workouts]..sort((a, b) => a.date.compareTo(b.date));
+    for (final w in workouts) {
+      final date = w.date.toIso8601String().split('.').first.replaceFirst(
+        'T',
+        ' ',
+      );
+      for (final we in w.exercises) {
+        final name = byId[we.exerciseId]?.name ?? 'Unknown exercise';
+        var order = 1;
+        for (final s in we.sets) {
+          rows.add([
+            date,
+            w.templateName ?? '',
+            name,
+            order++,
+            s.weight ?? '',
+            s.reps ?? '',
+            w.effortLevel,
+            we.notes ?? '',
+            w.notes ?? '',
+          ]);
+        }
+      }
+    }
+    return const ListToCsvConverter().convert(rows);
+  }
+
+  Future<File> exportWorkoutsCsvToFile() async {
+    final dir = await getTemporaryDirectory();
+    final stamp = DateTime.now().toIso8601String().split('T').first;
+    final file = File('${dir.path}/forma-workouts-$stamp.csv');
+    await file.writeAsString(await exportWorkoutsCsv(), flush: true);
+    return file;
+  }
+
+  /// Imports a Strong-style workout CSV, adding to the existing log (never
+  /// replacing). Rows are grouped into workouts by date + workout name and
+  /// into exercises by name; unknown exercise names are created. When
+  /// [weightsInKg] (or a "kg" weight header) applies, weights convert to lb.
+  Future<CsvImportResult> importWorkoutsCsv(
+    String csv, {
+    required bool weightsInKg,
+  }) {
+    return _mutate(() async {
+      final data = await _load();
+
+      final normalized = csv.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+      final delimiter = _sniffCsvDelimiter(normalized);
+      List<List<dynamic>> rows;
+      try {
+        rows = CsvToListConverter(
+          fieldDelimiter: delimiter,
+          eol: '\n',
+          shouldParseNumbers: false,
+        ).convert(normalized);
+      } catch (e) {
+        throw ImportException('That CSV could not be read: $e');
+      }
+      if (rows.length < 2) {
+        throw ImportException('The file has no data rows.');
+      }
+
+      final header = rows.first
+          .map((c) => c.toString().trim().toLowerCase())
+          .toList();
+      int col(List<String> names) =>
+          header.indexWhere((h) => names.contains(h));
+      final iDate = col(['date']);
+      final iWorkout = col(['workout name', 'workout']);
+      final iExercise = col(['exercise name', 'exercise']);
+      final iWeight = header.indexWhere((h) => h.startsWith('weight'));
+      final iReps = col(['reps', 'rep']);
+      final iRpe = col(['rpe']);
+      final iSetNotes = col(['set notes', 'notes']);
+      final iWorkoutNotes = col(['workout notes']);
+      if (iDate == -1 || iExercise == -1) {
+        throw ImportException(
+          "This doesn't look like a workout CSV — a Date and an Exercise "
+          'Name column are required.',
+        );
+      }
+      // A "Weight (kg)" header wins over the toggle; otherwise trust the caller.
+      final useKg = (iWeight != -1 && header[iWeight].contains('kg')) ||
+          weightsInKg;
+
+      // Index the library by normalized base signature so imported names map
+      // onto existing exercises across the Strong/Forma naming difference.
+      final index = <String, List<({int id, Set<String> equipment})>>{};
+      for (final e in data.exercises) {
+        final n = _normalizeExerciseName(e.name);
+        index
+            .putIfAbsent(n.base, () => [])
+            .add((id: e.id, equipment: n.equipment));
+      }
+
+      var exercisesCreated = 0;
+      int resolveExercise(String name) {
+        final n = _normalizeExerciseName(name);
+        final candidates = n.base.isEmpty ? null : index[n.base];
+        if (candidates != null && candidates.isNotEmpty) {
+          // A single base match is a strong signal on its own.
+          if (candidates.length == 1) return candidates.first.id;
+          // Several movements share this base (e.g. barbell vs dumbbell bench
+          // press) — pick by equipment: exact, then overlapping, then the
+          // equipment-free generic.
+          for (final c in candidates) {
+            if (c.equipment.length == n.equipment.length &&
+                c.equipment.containsAll(n.equipment)) {
+              return c.id;
+            }
+          }
+          for (final c in candidates) {
+            if (c.equipment.any(n.equipment.contains)) return c.id;
+          }
+          for (final c in candidates) {
+            if (c.equipment.isEmpty) return c.id;
+          }
+          // Distinct equipment none of them have → a genuinely new variant.
+        }
+        final created = Exercise(id: data.nextExerciseId++, name: name);
+        data.exercises.add(created);
+        index
+            .putIfAbsent(n.base, () => [])
+            .add((id: created.id, equipment: n.equipment));
+        exercisesCreated++;
+        return created.id;
+      }
+
+      final order = <String>[];
+      final builders = <String, _CsvWorkout>{};
+      for (var r = 1; r < rows.length; r++) {
+        final row = rows[r];
+        String cell(int i) =>
+            (i >= 0 && i < row.length) ? row[i].toString().trim() : '';
+
+        final exName = cell(iExercise);
+        if (exName.isEmpty) continue;
+        final dateStr = cell(iDate);
+        final date =
+            DateTime.tryParse(dateStr) ??
+            DateTime.tryParse(dateStr.replaceFirst(' ', 'T'));
+        if (date == null) continue;
+
+        var weight = double.tryParse(cell(iWeight));
+        // Parse via double so reps written as "8" or "8.0" both work; int
+        // parsing alone drops decimal-formatted reps and loses the reps entirely.
+        final reps = double.tryParse(cell(iReps))?.round();
+        if (weight == null && reps == null) continue; // nothing to log
+        if (weight != null && useKg) {
+          weight = double.parse((weight * 2.2046226218).toStringAsFixed(1));
+        }
+        final rpe = iRpe >= 0 ? double.tryParse(cell(iRpe)) : null;
+
+        final wName = iWorkout >= 0 ? cell(iWorkout) : '';
+        final key = '$dateStr|$wName';
+        final builder = builders.putIfAbsent(key, () {
+          order.add(key);
+          return _CsvWorkout(
+            date: date,
+            name: wName.isEmpty ? null : wName,
+            notes: iWorkoutNotes >= 0 ? cell(iWorkoutNotes) : '',
+          );
+        });
+        builder.addSet(
+          exercise: exName,
+          weight: weight,
+          reps: reps,
+          rpe: rpe,
+          setNotes: iSetNotes >= 0 ? cell(iSetNotes) : '',
+        );
+      }
+
+      var workoutsAdded = 0;
+      var setsAdded = 0;
+      for (final key in order) {
+        final b = builders[key]!;
+        if (b.exercises.isEmpty) continue;
+        final exercises = <WorkoutExercise>[];
+        for (final eb in b.exercises) {
+          var setNo = 1;
+          final sets = [
+            for (final s in eb.sets)
+              WorkoutSet(
+                id: data.nextWorkoutSetId++,
+                setNumber: setNo++,
+                weight: s.weight,
+                reps: s.reps,
+              ),
+          ];
+          setsAdded += sets.length;
+          exercises.add(
+            WorkoutExercise(
+              id: data.nextWorkoutExerciseId++,
+              exerciseId: resolveExercise(eb.name),
+              notes: eb.notes.isEmpty ? null : eb.notes,
+              sets: sets,
+            ),
+          );
+        }
+        data.workouts.add(
+          Workout(
+            id: data.nextWorkoutId++,
+            date: b.date,
+            effortLevel: b.effort,
+            notes: b.notes.isEmpty ? null : b.notes,
+            templateName: b.name,
+            exercises: exercises,
+          ),
+        );
+        workoutsAdded++;
+      }
+
+      if (workoutsAdded == 0) {
+        throw ImportException('No workouts could be read from that file.');
+      }
+      await _persist();
+      return CsvImportResult(
+        workouts: workoutsAdded,
+        sets: setsAdded,
+        exercisesCreated: exercisesCreated,
+      );
+    });
+  }
+
+  static String _sniffCsvDelimiter(String csv) {
+    final firstLine = csv
+        .split('\n')
+        .firstWhere((l) => l.trim().isNotEmpty, orElse: () => '');
+    final semis = ';'.allMatches(firstLine).length;
+    final commas = ','.allMatches(firstLine).length;
+    return semis > commas ? ';' : ',';
+  }
+
   /// Replaces the entire store with [json].
   ///
   /// Destructive by design — this restores a backup rather than merging, so
@@ -941,17 +1341,91 @@ class ApiClient {
   }
 }
 
+/// Outcome of a CSV import, for the confirmation message.
+class CsvImportResult {
+  CsvImportResult({
+    required this.workouts,
+    required this.sets,
+    required this.exercisesCreated,
+  });
+
+  final int workouts;
+  final int sets;
+
+  /// Exercise names in the file that weren't in the library and were created.
+  final int exercisesCreated;
+}
+
+// Transient builders used only while grouping CSV rows into workouts.
+
+class _CsvWorkout {
+  _CsvWorkout({required this.date, this.name, this.notes = ''});
+
+  final DateTime date;
+  final String? name;
+  final String notes;
+  final List<_CsvExercise> exercises = [];
+  final Map<String, _CsvExercise> _byName = {};
+  final List<double> _rpes = [];
+
+  void addSet({
+    required String exercise,
+    double? weight,
+    int? reps,
+    double? rpe,
+    String setNotes = '',
+  }) {
+    final e = _byName.putIfAbsent(exercise, () {
+      final created = _CsvExercise(exercise, setNotes);
+      exercises.add(created);
+      return created;
+    });
+    e.sets.add(_CsvSet(weight, reps));
+    if (rpe != null) _rpes.add(rpe);
+  }
+
+  /// Effort from the workout's average RPE when present, else a neutral 5.
+  int get effort {
+    if (_rpes.isEmpty) return 5;
+    final avg = _rpes.reduce((a, b) => a + b) / _rpes.length;
+    return avg.round().clamp(1, 10);
+  }
+}
+
+class _CsvExercise {
+  _CsvExercise(this.name, this.notes);
+
+  final String name;
+  final String notes;
+  final List<_CsvSet> sets = [];
+}
+
+class _CsvSet {
+  _CsvSet(this.weight, this.reps);
+
+  final double? weight;
+  final int? reps;
+}
+
 /// A workout exercise being composed in the UI, before the store assigns ids.
 class WorkoutExerciseDraft {
   WorkoutExerciseDraft({
     required this.exerciseId,
     this.notes,
     required this.sets,
+    this.supersetGroup,
+    this.restSeconds = 0,
   });
 
   final int exerciseId;
   final String? notes;
   final List<WorkoutSetDraft> sets;
+
+  /// Group id shared by exercises supersetted together; null when standalone.
+  final int? supersetGroup;
+
+  /// Rest between sets, in seconds; 0 for no rest timer.
+  final int restSeconds;
 }
 
 class WorkoutSetDraft {

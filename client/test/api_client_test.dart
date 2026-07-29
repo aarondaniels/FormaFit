@@ -118,6 +118,124 @@ void main() {
       expect(workout.exercises.single.exerciseId, 2);
     });
 
+    test('superset grouping is persisted and read back', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: 1,
+            supersetGroup: 1,
+            sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+          ),
+          WorkoutExerciseDraft(
+            exerciseId: 2,
+            supersetGroup: 1,
+            sets: [WorkoutSetDraft(weight: 50, reps: 10)],
+          ),
+          WorkoutExerciseDraft(
+            exerciseId: 3,
+            sets: [WorkoutSetDraft(weight: 75, reps: 8)],
+          ),
+        ],
+      );
+
+      // Reopen against the same file so this exercises fromJson too.
+      final workout = (await ApiClient().listWorkouts()).single;
+      expect(workout.exercises[0].supersetGroup, 1);
+      expect(workout.exercises[1].supersetGroup, 1);
+      expect(workout.exercises[2].supersetGroup, isNull);
+    });
+
+    test('per-exercise rest is persisted and read back', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: 1,
+            restSeconds: 120,
+            sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+          ),
+          WorkoutExerciseDraft(
+            exerciseId: 2,
+            sets: [WorkoutSetDraft(weight: 50, reps: 10)],
+          ),
+        ],
+      );
+
+      final workout = (await ApiClient().listWorkouts()).single;
+      expect(workout.exercises[0].restSeconds, 120);
+      // Unset defaults to 0 (no rest timer).
+      expect(workout.exercises[1].restSeconds, 0);
+    });
+
+    test('merging an exercise moves its history and deletes the source',
+        () async {
+      final api = ApiClient();
+      final dup = await api.createExercise(name: 'Bench Press');
+      // Log one workout under the duplicate, one under a seed exercise (1).
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: dup.id,
+            sets: [WorkoutSetDraft(weight: 135, reps: 8)],
+          ),
+        ],
+      );
+      await api.createWorkout(
+        date: DateTime(2026, 7, 2),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: 1,
+            sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+          ),
+        ],
+      );
+
+      await api.mergeExercise(sourceId: dup.id, targetId: 1);
+
+      // Source gone; both sessions now belong to exercise 1.
+      expect((await api.listExercises()).any((e) => e.id == dup.id), isFalse);
+      expect(await api.exerciseHistory(dup.id), isEmpty);
+      expect(await api.exerciseHistory(1), hasLength(2));
+    });
+
+    test('merging folds duplicate entries within one workout into one',
+        () async {
+      final api = ApiClient();
+      final dup = await api.createExercise(name: 'Bench Press');
+      // A single workout containing both the duplicate and the target.
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: 1,
+            sets: [WorkoutSetDraft(weight: 135, reps: 8)],
+          ),
+          WorkoutExerciseDraft(
+            exerciseId: dup.id,
+            sets: [WorkoutSetDraft(weight: 145, reps: 6)],
+          ),
+        ],
+      );
+
+      await api.mergeExercise(sourceId: dup.id, targetId: 1);
+
+      final workout = (await api.listWorkouts()).single;
+      expect(workout.exercises, hasLength(1));
+      final entry = workout.exercises.single;
+      expect(entry.exerciseId, 1);
+      expect(entry.sets, hasLength(2));
+      expect(entry.sets.map((s) => s.setNumber), [1, 2]);
+    });
+
     test('history for an exercise is newest first', () async {
       final api = ApiClient();
       for (final day in [3, 1, 2]) {
@@ -281,6 +399,26 @@ void main() {
       expect(await api.listTemplates(), isEmpty);
     });
 
+    test('template exercise rest is persisted and read back', () async {
+      final api = ApiClient();
+      final folder = await api.createFolder(name: 'Push');
+      await api.createTemplate(
+        folderId: folder.id,
+        name: 'Bench day',
+        exercises: [
+          TemplateExercise(
+            exerciseId: 1,
+            order: 0,
+            defaultSets: 3,
+            restSeconds: 150,
+          ),
+        ],
+      );
+
+      final template = (await ApiClient().listTemplates()).single;
+      expect(template.exercises.single.restSeconds, 150);
+    });
+
     test('template exercise order is normalized to list position', () async {
       final api = ApiClient();
       final folder = await api.createFolder(name: 'Push');
@@ -428,6 +566,158 @@ void main() {
         ),
         hasLength(1),
       );
+    });
+  });
+
+  group('CSV', () {
+    test('workouts export to CSV, one row per set', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 7,
+        templateName: 'Push',
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: 1,
+            sets: [
+              WorkoutSetDraft(weight: 135, reps: 8),
+              WorkoutSetDraft(weight: 145, reps: 6),
+            ],
+          ),
+        ],
+      );
+
+      final csv = await api.exportWorkoutsCsv();
+      final lines = csv.trim().split('\n');
+      expect(lines.first, startsWith('Date,Workout Name,Exercise Name'));
+      expect(lines.length, 3); // header + two sets
+      expect(lines[1], contains('Push'));
+      expect(lines[1], contains('135'));
+    });
+
+    test('imports a Strong-style CSV, grouping sets into workouts', () async {
+      final api = ApiClient();
+      const csv =
+          'Date,Workout Name,Exercise Name,Set Order,Weight,Reps,RPE\n'
+          '2026-07-01 08:00:00,Push,Bench Press,1,135,8,8\n'
+          '2026-07-01 08:00:00,Push,Bench Press,2,135,7,9\n'
+          '2026-07-01 08:00:00,Push,Overhead Press,1,95,5,\n'
+          '2026-07-03 08:00:00,Pull,Barbell Rows,1,155,8,\n';
+
+      final result = await api.importWorkoutsCsv(csv, weightsInKg: false);
+      expect(result.workouts, 2);
+      expect(result.sets, 4);
+      // "Bench Press" / "Overhead Press" — Overhead Press exists in the seed
+      // library, Bench Press doesn't (it's "Barbell Bench Press"), so some are
+      // created.
+      expect(result.exercisesCreated, greaterThan(0));
+
+      final workouts = await api.listWorkouts();
+      expect(workouts, hasLength(2));
+      final push = workouts.firstWhere((w) => w.templateName == 'Push');
+      expect(push.exercises, hasLength(2));
+      expect(push.exercises.first.sets, hasLength(2));
+      // Average RPE 8.5 → rounds to effort 9.
+      expect(push.effortLevel, 9);
+    });
+
+    test('Strong-style names map onto the seed library, no duplicates',
+        () async {
+      final api = ApiClient();
+      final seedCount = (await api.listExercises()).length;
+
+      // Strong's "Movement (Equipment)" against Forma's "Equipment Movement",
+      // plus plural and bodyweight differences.
+      const csv =
+          'Date,Exercise Name,Weight,Reps\n'
+          '2026-07-01,Bench Press (Barbell),135,5\n'
+          '2026-07-01,Squat (Barbell),225,5\n'
+          '2026-07-01,Pull Up (Bodyweight),0,10\n'
+          '2026-07-01,Lat Pulldown (Cable),120,10\n'
+          '2026-07-01,Deadlift (Barbell),315,3\n';
+
+      final result = await api.importWorkoutsCsv(csv, weightsInKg: false);
+      // All five resolve to existing seed exercises → none created.
+      expect(result.exercisesCreated, 0);
+      expect(await api.listExercises(), hasLength(seedCount));
+    });
+
+    test('equipment disambiguates variants that share a base', () async {
+      final api = ApiClient();
+      final byName = {
+        for (final e in await api.listExercises()) e.name: e.id,
+      };
+      // Seed has both "Barbell Bench Press" and "Dumbbell Bench Press".
+      const csv =
+          'Date,Exercise Name,Weight,Reps\n'
+          '2026-07-01,Bench Press (Dumbbell),50,10\n';
+
+      await api.importWorkoutsCsv(csv, weightsInKg: false);
+      final logged =
+          (await api.listWorkouts()).single.exercises.single.exerciseId;
+      expect(logged, byName['Dumbbell Bench Press']);
+    });
+
+    test('a genuinely unknown exercise is still created', () async {
+      final api = ApiClient();
+      const csv =
+          'Date,Exercise Name,Weight,Reps\n'
+          '2026-07-01,Zercher Squat (Barbell),185,5\n';
+
+      final result = await api.importWorkoutsCsv(csv, weightsInKg: false);
+      expect(result.exercisesCreated, 1);
+    });
+
+    test('kg weights convert to pounds on import', () async {
+      final api = ApiClient();
+      const csv =
+          'Date,Workout Name,Exercise Name,Set Order,Weight,Reps\n'
+          '2026-07-01,Legs,Squat,1,100,5\n';
+
+      await api.importWorkoutsCsv(csv, weightsInKg: true);
+      final set = (await api.listWorkouts()).single.exercises.single.sets.single;
+      expect(set.weight, closeTo(220.5, 0.1)); // 100 kg → 220.5 lb
+    });
+
+    test('a "Weight (kg)" header forces kg regardless of the toggle', () async {
+      final api = ApiClient();
+      const csv =
+          'Date,Exercise Name,Weight (kg),Reps\n'
+          '2026-07-01,Deadlift,100,5\n';
+
+      await api.importWorkoutsCsv(csv, weightsInKg: false);
+      final set = (await api.listWorkouts()).single.exercises.single.sets.single;
+      expect(set.weight, closeTo(220.5, 0.1));
+    });
+
+    test('a non-workout CSV is rejected with a clear message', () async {
+      final api = ApiClient();
+      await expectLater(
+        api.importWorkoutsCsv('a,b,c\n1,2,3\n', weightsInKg: false),
+        throwsA(isA<ImportException>()),
+      );
+    });
+
+    test('an export round-trips back through import', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: 1,
+            sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+          ),
+        ],
+      );
+      final csv = await api.exportWorkoutsCsv();
+
+      final fresh = ApiClient();
+      await fresh.resetAll();
+      final result = await fresh.importWorkoutsCsv(csv, weightsInKg: false);
+      expect(result.workouts, 1);
+      expect(result.sets, 1);
+      expect((await fresh.listWorkouts()).single.exercises.single.sets.single.weight, 100);
     });
   });
 

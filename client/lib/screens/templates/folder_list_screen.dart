@@ -7,20 +7,46 @@ import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
 import 'template_list_screen.dart';
 
-class FolderListScreen extends ConsumerWidget {
+class FolderListScreen extends ConsumerStatefulWidget {
   const FolderListScreen({super.key});
 
-  Future<void> _createFolder(BuildContext context, WidgetRef ref) async {
+  @override
+  ConsumerState<FolderListScreen> createState() => _FolderListScreenState();
+}
+
+class _FolderListScreenState extends ConsumerState<FolderListScreen> {
+  String _query = '';
+  final _searchController = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _createFolder() async {
     final name = await promptForName(
       context,
       title: 'New folder',
       hint: 'e.g. Push / Pull / Legs',
     );
-    if (name == null || !context.mounted) return;
+    if (name == null) return;
+    await _createFolderNamed(name);
+  }
+
+  /// Creates a folder with a known name (from the search box) and clears the
+  /// search so the new folder shows in the full list.
+  Future<void> _createFolderNamed(String name) async {
     try {
       await mutateWith(ref, (api) => api.createFolder(name: name));
+      if (mounted) {
+        setState(() {
+          _query = '';
+          _searchController.clear();
+        });
+      }
     } catch (e) {
-      if (context.mounted) {
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('$e')));
@@ -29,50 +55,100 @@ class FolderListScreen extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final folders = ref.watch(foldersProvider);
+    // All templates, to let a search by template name surface its folder.
+    final templates = ref.watch(templatesProvider(null)).value ?? const [];
 
-    return Stack(
+    return Column(
       children: [
-        folders.when(
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => AsyncFailure(
-            error: e,
-            onRetry: () => ref.read(storeRevisionProvider.notifier).bump(),
+        // Search full-width; creating a folder is offered from the empty
+        // state when a search finds nothing.
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+          child: TextField(
+            controller: _searchController,
+            onChanged: (v) => setState(() => _query = v),
+            decoration: InputDecoration(
+              hintText: 'Search templates',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _query.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () => setState(() {
+                        _query = '';
+                        _searchController.clear();
+                      }),
+                    ),
+              isDense: true,
+            ),
           ),
-          data: (list) {
-            if (list.isEmpty) {
-              return EmptyState(
-                icon: Icons.folder_outlined,
-                title: 'No template folders',
-                message:
-                    'Folders group your saved workouts — a “Push / Pull / Legs” '
-                    'folder, for example.',
-                action: FilledButton.icon(
-                  onPressed: () => _createFolder(context, ref),
-                  icon: const Icon(Icons.add),
-                  label: const Text('New folder'),
-                ),
-              );
-            }
-            return ListView.separated(
-              padding: glassPagePadding(context),
-              itemCount: list.length,
-              separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.sm),
-              itemBuilder: (_, i) => _FolderCard(folder: list[i]),
-            );
-          },
         ),
-        Positioned(
-          right: AppSpacing.md,
-          bottom: glassBottomInset(context),
-          child: folders.value?.isEmpty ?? true
-              ? const SizedBox.shrink()
-              : FloatingActionButton.small(
-                  heroTag: 'new-folder',
-                  onPressed: () => _createFolder(context, ref),
-                  child: const Icon(Icons.create_new_folder_outlined),
+        Expanded(
+          child: folders.when(
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (e, _) => AsyncFailure(
+              error: e,
+              onRetry: () => ref.read(storeRevisionProvider.notifier).bump(),
+            ),
+            data: (list) {
+              if (list.isEmpty) {
+                return EmptyState(
+                  icon: Icons.folder_outlined,
+                  title: 'No template folders',
+                  message:
+                      'Folders group your saved workouts — a “Push / Pull / '
+                      'Legs” folder, for example.',
+                  action: FilledButton.icon(
+                    onPressed: _createFolder,
+                    icon: const Icon(Icons.add),
+                    label: const Text('New folder'),
+                  ),
+                );
+              }
+
+              final q = _query.trim().toLowerCase();
+              final visible = q.isEmpty
+                  ? list
+                  : list.where((f) {
+                      if (f.name.toLowerCase().contains(q)) return true;
+                      return templates.any(
+                        (t) =>
+                            t.folderId == f.id &&
+                            t.name.toLowerCase().contains(q),
+                      );
+                    }).toList();
+
+              if (visible.isEmpty) {
+                final name = _query.trim();
+                return EmptyState(
+                  icon: Icons.create_new_folder_outlined,
+                  title: 'No matching templates',
+                  message:
+                      'Create a “$name” folder to group templates under it.',
+                  action: FilledButton.icon(
+                    onPressed: () => _createFolderNamed(name),
+                    icon: const Icon(Icons.add),
+                    label: Text('Create “$name” folder'),
+                  ),
+                );
+              }
+
+              return ListView.separated(
+                padding: EdgeInsets.fromLTRB(
+                  AppSpacing.md,
+                  AppSpacing.sm,
+                  AppSpacing.md,
+                  glassBottomInset(context),
                 ),
+                itemCount: visible.length,
+                separatorBuilder: (_, _) =>
+                    const SizedBox(height: AppSpacing.sm),
+                itemBuilder: (_, i) => _FolderCard(folder: visible[i]),
+              );
+            },
+          ),
         ),
       ],
     );

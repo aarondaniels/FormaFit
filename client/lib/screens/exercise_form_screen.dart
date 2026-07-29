@@ -7,10 +7,16 @@ import '../theme/tokens.dart';
 import '../widgets/glass.dart';
 
 /// Create or edit an exercise. Pass [existing] to edit.
+///
+/// On save it pops with the created/updated [Exercise], so callers like the
+/// exercise picker can immediately use a freshly created one.
 class ExerciseFormScreen extends ConsumerStatefulWidget {
-  const ExerciseFormScreen({super.key, this.existing});
+  const ExerciseFormScreen({super.key, this.existing, this.initialName});
 
   final Exercise? existing;
+
+  /// Prefills the name field when creating — used by "create from search".
+  final String? initialName;
 
   @override
   ConsumerState<ExerciseFormScreen> createState() => _ExerciseFormScreenState();
@@ -29,7 +35,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
   void initState() {
     super.initState();
     final e = widget.existing;
-    _name = TextEditingController(text: e?.name ?? '');
+    _name = TextEditingController(text: e?.name ?? widget.initialName ?? '');
     _description = TextEditingController(text: e?.description ?? '');
     _instructions = TextEditingController(text: e?.instructions ?? '');
     _muscleGroup = e?.muscleGroup;
@@ -49,7 +55,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
     setState(() => _saving = true);
     try {
       final existing = widget.existing;
-      await mutateWith(ref, (api) async {
+      final saved = await mutateWith(ref, (api) async {
         if (existing == null) {
           return api.createExercise(
             name: _name.text.trim(),
@@ -71,7 +77,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
           ),
         );
       });
-      if (mounted) Navigator.of(context).pop();
+      if (mounted) Navigator.of(context).pop(saved);
     } catch (e) {
       if (mounted) {
         setState(() => _saving = false);
@@ -95,6 +101,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: GlassAppBar(
+        leading: const GlassBackButton(icon: Icons.close),
         title: Text(isEdit ? 'Edit exercise' : 'New exercise'),
       ),
       body: Form(

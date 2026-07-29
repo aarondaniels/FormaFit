@@ -18,7 +18,10 @@ class TemplatePickerScreen extends ConsumerWidget {
 
     return Scaffold(
       extendBodyBehindAppBar: true,
-      appBar: const GlassAppBar(title: Text('Choose a template')),
+      appBar: const GlassAppBar(
+        leading: GlassBackButton(),
+        title: Text('Choose a template'),
+      ),
       body: all.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => AsyncFailure(error: e),
