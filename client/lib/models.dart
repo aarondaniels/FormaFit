@@ -523,7 +523,29 @@ class MeasurementKinds {
     bodyFat => '%',
     _ => 'in',
   };
+
+  /// Which direction counts as progress, so a change can be colored honestly.
+  ///
+  /// Only the near-universal cases take a side: waist and body fat down, limbs
+  /// and chest up. Body weight is deliberately [MeasurementGoal.neutral] — a
+  /// strength app has people cutting and bulking, and guessing wrong would
+  /// congratulate someone for the opposite of their goal.
+  static MeasurementGoal goalFor(String kind) => switch (kind) {
+    bodyFat || waist => MeasurementGoal.decrease,
+    chest || thigh || arm || calf => MeasurementGoal.increase,
+    _ => MeasurementGoal.neutral,
+  };
+
+  /// Sort key placing known kinds in declaration order and unknown (user-typed)
+  /// kinds after them.
+  static int orderOf(String kind) {
+    final i = all.indexOf(kind);
+    return i == -1 ? all.length : i;
+  }
 }
+
+/// Whether an increase in a measurement is progress, a regression, or neither.
+enum MeasurementGoal { increase, decrease, neutral }
 
 class Measurement {
   final int id;
@@ -632,6 +654,46 @@ class TimePoint {
   final double value;
 
   TimePoint(this.date, this.value);
+}
+
+/// One measurement kind condensed for the overview list: where it stands now,
+/// how far it has moved, and enough history to draw a sparkline.
+class MeasurementSummary {
+  final String kind;
+  final String unit;
+
+  /// Most recent value and when it was taken.
+  final double latest;
+  final DateTime latestDate;
+
+  /// Change from the first recorded value, and from the entry before this one.
+  /// Both null until there are two entries.
+  final double? changeOverall;
+  final double? changeLast;
+
+  final int entryCount;
+
+  /// Every value for the kind, oldest first.
+  final List<TimePoint> series;
+
+  MeasurementSummary({
+    required this.kind,
+    required this.unit,
+    required this.latest,
+    required this.latestDate,
+    required this.changeOverall,
+    required this.changeLast,
+    required this.entryCount,
+    required this.series,
+  });
+
+  /// Whole days since the last entry, for the "measured N days ago" line.
+  int daysSince(DateTime now) =>
+      DateTime(now.year, now.month, now.day)
+          .difference(
+            DateTime(latestDate.year, latestDate.month, latestDate.day),
+          )
+          .inDays;
 }
 
 class WorkoutStats {

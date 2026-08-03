@@ -460,6 +460,121 @@ void main() {
       final series = await api.measurementSeries(MeasurementKinds.bodyWeight);
       expect(series.map((p) => p.date.day), [1, 2, 3]);
     });
+
+    test('a session stores every kind against one date', () async {
+      final api = ApiClient();
+      final created = await api.createMeasurements(
+        date: DateTime(2026, 7, 4),
+        entries: [
+          MeasurementDraft(kind: MeasurementKinds.bodyWeight, value: 181),
+          MeasurementDraft(kind: MeasurementKinds.waist, value: 33.5),
+          MeasurementDraft(kind: MeasurementKinds.arm, value: 15.25),
+        ],
+      );
+
+      expect(created, hasLength(3));
+      expect(created.map((m) => m.id).toSet(), hasLength(3));
+      expect(created.every((m) => m.date == DateTime(2026, 7, 4)), isTrue);
+      // Units still come from the kind when the draft doesn't name one.
+      expect(created.first.unit, 'lb');
+      expect(created.last.unit, 'in');
+      expect(await api.listMeasurements(), hasLength(3));
+    });
+
+    test('summaries cover only kinds with entries', () async {
+      final api = ApiClient();
+      await api.createMeasurements(
+        date: DateTime(2026, 7, 1),
+        entries: [
+          MeasurementDraft(kind: MeasurementKinds.bodyWeight, value: 180),
+          MeasurementDraft(kind: MeasurementKinds.waist, value: 34),
+        ],
+      );
+
+      final summaries = await api.measurementSummaries();
+      expect(summaries.map((s) => s.kind), [
+        MeasurementKinds.bodyWeight,
+        MeasurementKinds.waist,
+      ]);
+      expect(summaries.every((s) => s.entryCount == 1), isTrue);
+      // One entry is no trend, so neither change is defined yet.
+      expect(summaries.first.changeOverall, isNull);
+      expect(summaries.first.changeLast, isNull);
+    });
+
+    test('a summary reports latest, overall change and last change', () async {
+      final api = ApiClient();
+      for (final entry in [(1, 180.0), (2, 178.0), (3, 175.0)]) {
+        await api.createMeasurement(
+          date: DateTime(2026, 7, entry.$1),
+          kind: MeasurementKinds.bodyWeight,
+          value: entry.$2,
+        );
+      }
+
+      final summary = (await api.measurementSummaries()).single;
+      expect(summary.latest, 175.0);
+      expect(summary.latestDate, DateTime(2026, 7, 3));
+      expect(summary.entryCount, 3);
+      expect(summary.changeOverall, -5.0);
+      expect(summary.changeLast, -3.0);
+      expect(summary.series.map((p) => p.value), [180.0, 178.0, 175.0]);
+    });
+
+    test('summaries put unknown kinds after the standard ones', () async {
+      final api = ApiClient();
+      await api.createMeasurements(
+        date: DateTime(2026, 7, 1),
+        entries: [
+          MeasurementDraft(kind: 'Forearm', value: 12),
+          MeasurementDraft(kind: MeasurementKinds.chest, value: 42),
+        ],
+      );
+
+      final summaries = await api.measurementSummaries();
+      expect(summaries.map((s) => s.kind), [MeasurementKinds.chest, 'Forearm']);
+    });
+
+    test('a rolling average smooths within its window', () async {
+      final points = [
+        TimePoint(DateTime(2026, 7, 1), 180),
+        TimePoint(DateTime(2026, 7, 2), 184),
+        TimePoint(DateTime(2026, 7, 3), 176),
+      ];
+
+      final smoothed = ApiClient.rollingAverage(points);
+
+      expect(smoothed, hasLength(3));
+      // Each point averages everything within the preceding window, so the
+      // first is itself and the series never runs ahead of the data.
+      expect(smoothed[0].value, 180);
+      expect(smoothed[1].value, 182);
+      expect(smoothed[2].value, 180);
+      expect(smoothed.map((p) => p.date), points.map((p) => p.date));
+    });
+
+    test('a rolling average drops readings outside the window', () async {
+      final points = [
+        TimePoint(DateTime(2026, 7, 1), 200),
+        TimePoint(DateTime(2026, 7, 20), 180),
+        TimePoint(DateTime(2026, 7, 21), 178),
+      ];
+
+      final smoothed = ApiClient.rollingAverage(points);
+
+      // The July 1 reading is far outside the 7-day window by the 20th, so it
+      // can't drag the average.
+      expect(smoothed[1].value, 180);
+      expect(smoothed[2].value, 179);
+    });
+
+    test('a rolling average needs two points', () async {
+      expect(ApiClient.rollingAverage(const []), isEmpty);
+      expect(
+        ApiClient.rollingAverage([TimePoint(DateTime(2026, 7, 1), 180)]),
+        isEmpty,
+      );
+    });
   });
 
   group('persistence', () {

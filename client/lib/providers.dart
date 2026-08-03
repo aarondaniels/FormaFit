@@ -135,6 +135,14 @@ final measurementSeriesProvider =
       return ref.watch(apiProvider).measurementSeries(kind);
     });
 
+/// Every kind that has been measured, condensed for the overview list.
+final measurementSummariesProvider = FutureProvider<List<MeasurementSummary>>((
+  ref,
+) async {
+  ref.watch(storeRevisionProvider);
+  return ref.watch(apiProvider).measurementSummaries();
+});
+
 /// Which exercise-library filters are active. Held in memory so the list
 /// keeps its filters while navigating in and out of exercise details.
 class ExerciseFilter {

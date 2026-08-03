@@ -705,6 +705,37 @@ class ApiClient {
     });
   }
 
+  /// Records several kinds taken in one sitting.
+  ///
+  /// Measuring is a batch act — the tape comes out once — so the whole session
+  /// is a single queued write and a single file flush rather than one per
+  /// value. Drafts with no value are the caller's to filter; anything passed
+  /// here is stored.
+  Future<List<Measurement>> createMeasurements({
+    required DateTime date,
+    required List<MeasurementDraft> entries,
+  }) {
+    return _mutate(() async {
+      final data = await _load();
+      final created = <Measurement>[];
+      for (final draft in entries) {
+        created.add(
+          Measurement(
+            id: data.nextMeasurementId++,
+            date: date,
+            kind: draft.kind,
+            value: draft.value,
+            unit: draft.unit ?? MeasurementKinds.unitFor(draft.kind),
+            notes: draft.notes,
+          ),
+        );
+      }
+      data.measurements.addAll(created);
+      await _persist();
+      return List.unmodifiable(created);
+    });
+  }
+
   Future<Measurement> updateMeasurement(Measurement updated) {
     return _mutate(() async {
       final data = await _load();
@@ -733,6 +764,79 @@ class ApiClient {
         .reversed
         .toList();
     return List.unmodifiable(points);
+  }
+
+  /// One summary per kind that has been measured at least once, in the order
+  /// [MeasurementKinds.all] declares with any user-invented kinds after.
+  ///
+  /// Kinds with no entries are left out entirely: the overview is a record of
+  /// what is actually being tracked, not a checklist of what could be.
+  Future<List<MeasurementSummary>> measurementSummaries() async {
+    final data = await _load();
+    final byKind = <String, List<Measurement>>{};
+    for (final m in data.measurements) {
+      byKind.putIfAbsent(m.kind, () => []).add(m);
+    }
+
+    final summaries = <MeasurementSummary>[];
+    for (final entry in byKind.entries) {
+      final sorted = [...entry.value]..sort((a, b) => a.date.compareTo(b.date));
+      final latest = sorted.last;
+      summaries.add(
+        MeasurementSummary(
+          kind: entry.key,
+          unit: latest.unit,
+          latest: latest.value,
+          latestDate: latest.date,
+          changeOverall: sorted.length >= 2
+              ? latest.value - sorted.first.value
+              : null,
+          changeLast: sorted.length >= 2
+              ? latest.value - sorted[sorted.length - 2].value
+              : null,
+          entryCount: sorted.length,
+          series: List.unmodifiable([
+            for (final m in sorted) TimePoint(m.date, m.value),
+          ]),
+        ),
+      );
+    }
+
+    summaries.sort((a, b) {
+      final byOrder = MeasurementKinds.orderOf(
+        a.kind,
+      ).compareTo(MeasurementKinds.orderOf(b.kind));
+      return byOrder != 0 ? byOrder : a.kind.compareTo(b.kind);
+    });
+    return List.unmodifiable(summaries);
+  }
+
+  /// Trailing average over [windowDays], for series noisy enough that the raw
+  /// line hides the trend — body weight above all, where day-to-day water
+  /// swings dwarf the change anyone is actually looking for.
+  ///
+  /// Each point averages every value within the preceding window (inclusive),
+  /// so the result is defined from the first point on and never runs ahead of
+  /// the data. Fewer than two points has no trend to draw.
+  static List<TimePoint> rollingAverage(
+    List<TimePoint> points, {
+    int windowDays = 7,
+  }) {
+    if (points.length < 2) return const [];
+    final smoothed = <TimePoint>[];
+    for (var i = 0; i < points.length; i++) {
+      final cutoff = points[i].date.subtract(Duration(days: windowDays));
+      var sum = 0.0;
+      var count = 0;
+      // Walk back while inside the window; points are oldest first.
+      for (var j = i; j >= 0; j--) {
+        if (points[j].date.isBefore(cutoff)) break;
+        sum += points[j].value;
+        count++;
+      }
+      smoothed.add(TimePoint(points[i].date, sum / count));
+    }
+    return List.unmodifiable(smoothed);
   }
 
   // -------------------------------------------------------------------------
@@ -1426,6 +1530,23 @@ class WorkoutExerciseDraft {
 
   /// Rest between sets, in seconds; 0 for no rest timer.
   final int restSeconds;
+}
+
+/// One kind's value within a measurement session, before it is stored.
+class MeasurementDraft {
+  MeasurementDraft({
+    required this.kind,
+    required this.value,
+    this.unit,
+    this.notes,
+  });
+
+  final String kind;
+  final double value;
+
+  /// Defaults to [MeasurementKinds.unitFor] when omitted.
+  final String? unit;
+  final String? notes;
 }
 
 class WorkoutSetDraft {

@@ -5,7 +5,6 @@ import '../widgets/glass.dart';
 import 'analytics_screen.dart';
 import 'dashboard_screen.dart';
 import 'exercise_library_screen.dart';
-import 'measurements_screen.dart';
 import 'settings_screen.dart';
 import 'templates/folder_list_screen.dart';
 import 'workout/log_workout_screen.dart';
@@ -43,17 +42,6 @@ class _HomeScreenState extends State<HomeScreen> {
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (_index == 3) ...[
-                    GlassIconButton(
-                      icon: const Icon(Icons.straighten),
-                      onPressed: () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const MeasurementsScreen(),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: AppSpacing.sm),
-                  ],
                   GlassIconButton(
                     icon: const Icon(Icons.add),
                     onPressed: () => Navigator.of(context).push(

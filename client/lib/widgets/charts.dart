@@ -18,12 +18,28 @@ class TimeSeriesChart extends StatelessWidget {
     required this.color,
     this.unit = '',
     this.filled = true,
+    this.decimals,
+    this.trend,
   });
 
   final List<TimePoint> points;
   final Color color;
   final String unit;
   final bool filled;
+
+  /// Fixed decimal places for axis labels and tooltips. Left null, numbers are
+  /// abbreviated ([compactAxisNumber]), which is right for volume but wrong for
+  /// a series like arm circumference whose whole range rounds to one integer.
+  final int? decimals;
+
+  /// Optional smoothed series drawn as the emphasized line, with [points]
+  /// dropped back to a faint raw trace behind it. Used for body weight, where
+  /// the daily reading is noise and the average is the signal.
+  final List<TimePoint>? trend;
+
+  String _format(double value) => decimals == null
+      ? compactAxisNumber(value)
+      : value.toStringAsFixed(decimals!);
 
   @override
   Widget build(BuildContext context) {
@@ -36,15 +52,27 @@ class TimeSeriesChart extends StatelessWidget {
       );
     }
 
+    final smoothed = trend != null && trend!.length >= 2 ? trend! : null;
+
     // Plot against millisecond x so uneven gaps between sessions show as
     // uneven spacing rather than being evenly distributed.
     final spots = [
       for (final p in points)
         FlSpot(p.date.millisecondsSinceEpoch.toDouble(), p.value),
     ];
+    final trendSpots = smoothed == null
+        ? const <FlSpot>[]
+        : [
+            for (final p in smoothed)
+              FlSpot(p.date.millisecondsSinceEpoch.toDouble(), p.value),
+          ];
     final minX = spots.first.x;
     final maxX = spots.last.x;
-    final values = points.map((p) => p.value);
+    // Both series share the band so neither is clipped.
+    final values = [
+      ...points.map((p) => p.value),
+      if (smoothed != null) ...smoothed.map((p) => p.value),
+    ];
     final minY = values.reduce((a, b) => a < b ? a : b);
     final maxY = values.reduce((a, b) => a > b ? a : b);
     // Pad the band so the line never rides the top or bottom edge; a flat
@@ -76,7 +104,7 @@ class TimeSeriesChart extends StatelessWidget {
                   return const SizedBox.shrink();
                 }
                 return Text(
-                  compactAxisNumber(value),
+                  _format(value),
                   style: AppTypography.small.copyWith(
                     color: AppColors.mutedOnDark,
                     fontSize: 10,
@@ -113,7 +141,7 @@ class TimeSeriesChart extends StatelessWidget {
             getTooltipItems: (touched) => [
               for (final t in touched)
                 LineTooltipItem(
-                  '${compactAxisNumber(t.y)}$unit\n'
+                  '${_format(t.y)}$unit\n'
                   '${DateFormat.yMMMd().format(DateTime.fromMillisecondsSinceEpoch(t.x.toInt()))}',
                   AppTypography.small.copyWith(color: AppColors.onDark),
                 ),
@@ -121,15 +149,19 @@ class TimeSeriesChart extends StatelessWidget {
           ),
         ),
         lineBarsData: [
+          // With a trend overlay the raw readings drop back to a faint trace:
+          // still visible for context, but no longer the thing being read.
           LineChartBarData(
             spots: spots,
             isCurved: true,
             curveSmoothness: 0.2,
             preventCurveOverShooting: true,
-            color: color,
-            barWidth: 2.5,
+            color: smoothed == null
+                ? color
+                : color.withValues(alpha: 0.28),
+            barWidth: smoothed == null ? 2.5 : 1.5,
             dotData: FlDotData(
-              show: spots.length <= 12,
+              show: smoothed == null && spots.length <= 12,
               getDotPainter: (_, _, _, _) => FlDotCirclePainter(
                 radius: 3,
                 color: color,
@@ -137,12 +169,95 @@ class TimeSeriesChart extends StatelessWidget {
               ),
             ),
             belowBarData: BarAreaData(
-              show: filled,
+              show: filled && smoothed == null,
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
                   color.withValues(alpha: 0.25),
+                  color.withValues(alpha: 0.0),
+                ],
+              ),
+            ),
+          ),
+          if (smoothed != null)
+            LineChartBarData(
+              spots: trendSpots,
+              isCurved: true,
+              curveSmoothness: 0.2,
+              preventCurveOverShooting: true,
+              color: color,
+              barWidth: 2.5,
+              dotData: const FlDotData(show: false),
+              belowBarData: BarAreaData(
+                show: filled,
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    color.withValues(alpha: 0.25),
+                    color.withValues(alpha: 0.0),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A bare trend line — no axes, grid, labels or touch — sized by its parent.
+///
+/// For list rows where the shape of the history is the whole message and the
+/// exact values are already spelled out beside it.
+class Sparkline extends StatelessWidget {
+  const Sparkline({super.key, required this.points, required this.color});
+
+  final List<TimePoint> points;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    if (points.length < 2) return const SizedBox.shrink();
+
+    final spots = [
+      for (final p in points)
+        FlSpot(p.date.millisecondsSinceEpoch.toDouble(), p.value),
+    ];
+    final values = points.map((p) => p.value);
+    final minY = values.reduce((a, b) => a < b ? a : b);
+    final maxY = values.reduce((a, b) => a > b ? a : b);
+    // A flat series still needs a non-zero band or the line collapses onto an
+    // edge; otherwise leave a little air above and below.
+    final pad = (maxY - minY) == 0 ? (maxY.abs() * 0.1 + 1) : (maxY - minY) * 0.2;
+
+    return LineChart(
+      LineChartData(
+        minX: spots.first.x,
+        maxX: spots.last.x,
+        minY: minY - pad,
+        maxY: maxY + pad,
+        gridData: const FlGridData(show: false),
+        borderData: FlBorderData(show: false),
+        titlesData: const FlTitlesData(show: false),
+        lineTouchData: const LineTouchData(enabled: false),
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            curveSmoothness: 0.2,
+            preventCurveOverShooting: true,
+            color: color,
+            barWidth: 2,
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(
+              show: true,
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  color.withValues(alpha: 0.22),
                   color.withValues(alpha: 0.0),
                 ],
               ),
