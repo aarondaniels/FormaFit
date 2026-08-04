@@ -98,7 +98,10 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
             supersetGroup: we.supersetGroup,
             restSeconds: we.restSeconds,
             sets: [
-              for (final s in we.sets) _SetEntry(weight: s.weight, reps: s.reps),
+              // Sets coming back from a saved workout were performed, so they
+              // open already checked.
+              for (final s in we.sets)
+                _SetEntry(weight: s.weight, reps: s.reps, complete: true),
             ],
           ),
         );
@@ -242,6 +245,32 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     }
   }
 
+  /// Lands on the weight of the set after [set], which for a superset is the
+  /// same set number of the next exercise in the group rather than this
+  /// exercise's next set — [_focusOrder] already walks them interleaved.
+  ///
+  /// Every set contributes exactly its weight then its reps to that order, so
+  /// the field following a set's reps is the next set's weight.
+  void _focusWeightAfter(_SetEntry set) {
+    final order = _focusOrder();
+    final idx = order.indexOf(set.repsFocus);
+    if (idx == -1) return;
+    if (idx + 1 < order.length) {
+      FocusScope.of(context).requestFocus(order[idx + 1]);
+    } else {
+      FocusScope.of(context).unfocus();
+    }
+  }
+
+  /// Marks a set done: the shared tail of all three completing gestures —
+  /// tapping the check, pressing Next off a full set, and tapping the
+  /// historical value that fills its last blank.
+  void _completeSet(_SetEntry set, int restSeconds) {
+    set.completed.value = true;
+    if (restSeconds > 0) _startRest(restSeconds);
+    _focusWeightAfter(set);
+  }
+
   /// The set field currently focused: its controller, whether it is a weight
   /// field (decimals allowed) rather than reps, and which exercise/set it is
   /// (so its historical value can be looked up). Null when no set field has
@@ -252,6 +281,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     int exerciseId,
     int setIndex,
     int restSeconds,
+    _SetEntry set,
   })?
   _activeFieldTarget(FocusNode? node) {
     if (node == null) return null;
@@ -265,6 +295,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
             exerciseId: e.exerciseId,
             setIndex: i,
             restSeconds: e.restSeconds,
+            set: s,
           );
         }
         if (s.repsFocus == node) {
@@ -274,6 +305,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
             exerciseId: e.exerciseId,
             setIndex: i,
             restSeconds: e.restSeconds,
+            set: s,
           );
         }
       }
@@ -284,9 +316,18 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   /// Advances from [current] to the next field, first filling it with this
   /// set's value from last time when it was left blank — so a user can adopt
   /// their previous workout by tapping Enter straight down the fields.
+  ///
+  /// Pressing Next off the reps of a set that now holds both a weight and a
+  /// rep count completes it and jumps to the next set's weight, skipping the
+  /// fields already behind you.
   void _enterFromField(FocusNode current) {
     final target = _activeFieldTarget(current);
-    if (target != null && target.controller.text.trim().isEmpty) {
+    if (target == null) {
+      _focusNextField(current);
+      return;
+    }
+
+    if (target.controller.text.trim().isEmpty) {
       final value = _historicalValue(
         target.exerciseId,
         target.setIndex,
@@ -299,13 +340,10 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
         );
       }
     }
-    // Leaving a reps field with a value completes the set — kick off the rest
-    // timer for that exercise.
-    if (target != null &&
-        !target.isWeight &&
-        target.restSeconds > 0 &&
-        target.controller.text.trim().isNotEmpty) {
-      _startRest(target.restSeconds);
+
+    if (!target.isWeight && target.set.isFull) {
+      _completeSet(target.set, target.restSeconds);
+      return;
     }
     _focusNextField(current);
   }
@@ -847,6 +885,8 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
                     onRestChanged: (v) =>
                         setState(() => _entries[i].restSeconds = v),
                     onStartRest: () => _startRest(_entries[i].restSeconds),
+                    onSetCompleted: (s) =>
+                        _completeSet(s, _entries[i].restSeconds),
                     onChanged: () => setState(() {}),
                     onRemove: () => setState(() {
                       _entries.removeAt(i).dispose();
@@ -990,6 +1030,7 @@ class _ExerciseCard extends ConsumerWidget {
     required this.onLeaveSuperset,
     required this.onRestChanged,
     required this.onStartRest,
+    required this.onSetCompleted,
     required this.onChanged,
     required this.onRemove,
   });
@@ -1005,8 +1046,52 @@ class _ExerciseCard extends ConsumerWidget {
   final VoidCallback onLeaveSuperset;
   final ValueChanged<int> onRestChanged;
   final VoidCallback onStartRest;
+
+  /// A set the user declared done — the screen marks it, starts rest and moves
+  /// focus on, since only it knows the order sets are worked through.
+  final ValueChanged<_SetEntry> onSetCompleted;
   final VoidCallback onChanged;
   final VoidCallback onRemove;
+
+  /// One set row, swipeable to remove.
+  ///
+  /// Removal used to live on the trailing control, but that space is now the
+  /// completion check — so it moves to a swipe, matching how rows are removed
+  /// elsewhere in the app. The only remaining set stays put: an exercise with
+  /// no sets has nothing to show.
+  Widget _setRow(int i, List<WorkoutSet>? lastSets) {
+    final row = _SetRow(
+      index: i,
+      set: entry.sets[i],
+      // The set at the same position last time, if there was one.
+      previousSet: (lastSets != null && i < lastSets.length)
+          ? lastSets[i]
+          : null,
+      onCompleted: () => onSetCompleted(entry.sets[i]),
+    );
+
+    if (entry.sets.length == 1) return row;
+
+    return Dismissible(
+      key: ObjectKey(entry.sets[i]),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: AppSpacing.md),
+        margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+        decoration: BoxDecoration(
+          color: AppColors.error,
+          borderRadius: BorderRadius.circular(AppSpacing.radiusSmall),
+        ),
+        child: const Icon(Icons.delete, size: 18, color: Colors.white),
+      ),
+      onDismissed: (_) {
+        entry.sets.removeAt(i).dispose();
+        onChanged();
+      },
+      child: row,
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1137,21 +1222,7 @@ class _ExerciseCard extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: AppSpacing.xs),
-          for (var i = 0; i < entry.sets.length; i++)
-            _SetRow(
-              index: i,
-              set: entry.sets[i],
-              // The set at the same position last time, if there was one.
-              previousSet: (lastSets != null && i < lastSets.length)
-                  ? lastSets[i]
-                  : null,
-              onRemove: entry.sets.length == 1
-                  ? null
-                  : () {
-                      entry.sets.removeAt(i).dispose();
-                      onChanged();
-                    },
-            ),
+          for (var i = 0; i < entry.sets.length; i++) _setRow(i, lastSets),
           const SizedBox(height: AppSpacing.sm),
           TextButton.icon(
             onPressed: () {
@@ -1191,7 +1262,7 @@ class _SetRow extends StatelessWidget {
     required this.index,
     required this.set,
     required this.previousSet,
-    this.onRemove,
+    required this.onCompleted,
   });
 
   final int index;
@@ -1200,7 +1271,51 @@ class _SetRow extends StatelessWidget {
   /// What was logged for this set position last time, shown greyed below the
   /// fields as a reference. Null when there is no matching historical set.
   final WorkoutSet? previousSet;
-  final VoidCallback? onRemove;
+
+  /// Called when the set transitions to complete, so the exercise can start its
+  /// rest timer — the same event as leaving a filled reps field.
+  final VoidCallback onCompleted;
+
+  /// Copies a historical value into a field that is still blank, so checking an
+  /// untouched set records what you did last time rather than nothing.
+  void _fillIfBlank(TextEditingController controller, String? value) {
+    if (value == null || controller.text.trim().isNotEmpty) return;
+    controller.value = TextEditingValue(
+      text: value,
+      selection: TextSelection.collapsed(offset: value.length),
+    );
+  }
+
+  void _toggle() {
+    if (set.isComplete) {
+      set.completed.value = false;
+      return;
+    }
+
+    _fillIfBlank(
+      set.weightController,
+      previousSet?.weight == null ? null : trimNumber(previousSet!.weight!),
+    );
+    _fillIfBlank(set.repsController, previousSet?.reps?.toString());
+
+    // With nothing typed and no history to borrow, there is nothing to mark
+    // complete — an empty set is dropped on save, so a check here would promise
+    // a record that never gets written. Send the user to the field instead.
+    if (set.isEmpty) {
+      set.weightFocus.requestFocus();
+      return;
+    }
+
+    onCompleted();
+  }
+
+  /// Tapping a greyed historical value fills its field; when that fills the
+  /// last blank, the set is done and we move on — the third completing gesture,
+  /// alongside the check and Next.
+  void _onReferenceFilled() {
+    if (!set.isFull || set.isComplete) return;
+    onCompleted();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1229,6 +1344,7 @@ class _SetRow extends StatelessWidget {
               controller: set.weightController,
               focusNode: set.weightFocus,
               reference: prevWeight == null ? null : trimNumber(prevWeight),
+              onFilled: _onReferenceFilled,
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
@@ -1237,53 +1353,50 @@ class _SetRow extends StatelessWidget {
               controller: set.repsController,
               focusNode: set.repsFocus,
               reference: prevReps?.toString(),
+              onFilled: _onReferenceFilled,
             ),
           ),
           SizedBox(
             width: 40,
             child: Padding(
               padding: const EdgeInsets.only(top: AppSpacing.sm),
-              // Reacts live to the fields: once a set has reps it reads as done
-              // (a green check); until then it's the remove control.
+              // Reacts live to the fields and to an explicit tap: a set with
+              // reps still reads as done on its own, and the empty ring is a
+              // real target you can hit to complete the set yourself.
               child: ListenableBuilder(
                 listenable: Listenable.merge([
                   set.weightController,
                   set.repsController,
+                  set.completed,
                 ]),
                 builder: (context, _) {
-                  final done = set.reps != null;
-                  final Widget content = done
-                      ? const Icon(
-                          Icons.check_circle,
-                          key: ValueKey('done'),
-                          size: 22,
-                          color: AppColors.success,
-                        )
-                      : onRemove != null
-                      ? const Icon(
-                          Icons.remove_circle_outline,
-                          key: ValueKey('remove'),
-                          size: 18,
-                          color: AppColors.mutedOnDark,
-                        )
-                      : const SizedBox.shrink(key: ValueKey('empty'));
+                  final done = set.isComplete;
                   final animated = AnimatedSwitcher(
                     duration: const Duration(milliseconds: 220),
                     transitionBuilder: (child, anim) => ScaleTransition(
                       scale: anim,
                       child: FadeTransition(opacity: anim, child: child),
                     ),
-                    child: content,
+                    child: done
+                        ? const Icon(
+                            Icons.check_circle,
+                            key: ValueKey('done'),
+                            size: 22,
+                            color: AppColors.success,
+                          )
+                        : const Icon(
+                            Icons.radio_button_unchecked,
+                            key: ValueKey('open'),
+                            size: 20,
+                            color: AppColors.mutedOnDark,
+                          ),
                   );
-                  // A removable set keeps tap-to-remove on the control; the
-                  // last set's check is a plain (vivid) indicator.
-                  return onRemove == null
-                      ? Center(child: animated)
-                      : IconButton(
-                          padding: EdgeInsets.zero,
-                          onPressed: onRemove,
-                          icon: animated,
-                        );
+                  return IconButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: _toggle,
+                    tooltip: done ? 'Mark set incomplete' : 'Mark set complete',
+                    icon: animated,
+                  );
                 },
               ),
             ),
@@ -1306,11 +1419,16 @@ class _FieldWithReference extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.reference,
+    required this.onFilled,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final String? reference;
+
+  /// Called after the reference is copied in, so the row can complete itself
+  /// when that was the last blank field.
+  final VoidCallback onFilled;
 
   void _fillFromReference() {
     final value = reference;
@@ -1318,6 +1436,7 @@ class _FieldWithReference extends StatelessWidget {
     controller
       ..text = value
       ..selection = TextSelection.collapsed(offset: value.length);
+    onFilled();
   }
 
   @override
@@ -1685,18 +1804,28 @@ class _ExerciseEntry {
 /// A set row's live text, kept in controllers so partially-typed values
 /// survive rebuilds.
 class _SetEntry {
-  _SetEntry({double? weight, int? reps})
+  _SetEntry({double? weight, int? reps, bool complete = false})
     : weightController = TextEditingController(
         text: weight == null ? '' : trimNumber(weight),
       ),
       repsController = TextEditingController(
         text: reps?.toString() ?? '',
-      );
+      ),
+      completed = ValueNotifier(complete);
 
   final TextEditingController weightController;
   final TextEditingController repsController;
   final FocusNode weightFocus = FocusNode();
   final FocusNode repsFocus = FocusNode();
+
+  /// Whether the user has declared this set done.
+  ///
+  /// Completion is deliberately never inferred from the fields: typing a rep
+  /// count means you are entering a set, not that you finished it. Only three
+  /// gestures set this — tapping the check, pressing Next off a full set, and
+  /// tapping a historical value that fills the last blank. Sets rehydrated from
+  /// a saved workout start complete, since they were performed.
+  final ValueNotifier<bool> completed;
 
   double? get weight => double.tryParse(weightController.text.trim());
 
@@ -1704,10 +1833,20 @@ class _SetEntry {
 
   bool get isEmpty => weight == null && reps == null;
 
+  /// Both fields carry a value, which is what the completing gestures require.
+  bool get isFull =>
+      weightController.text.trim().isNotEmpty &&
+      repsController.text.trim().isNotEmpty;
+
+  /// A row emptied after the fact drops its check: empty sets are dropped on
+  /// save, so the mark would advertise a record that never gets written.
+  bool get isComplete => completed.value && !isEmpty;
+
   void dispose() {
     weightController.dispose();
     repsController.dispose();
     weightFocus.dispose();
     repsFocus.dispose();
+    completed.dispose();
   }
 }
