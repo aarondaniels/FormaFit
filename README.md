@@ -10,7 +10,13 @@ Built with Flutter · Riverpod (iOS & Android). The app lives in
 ## Features
 
 - **Workout logging**: exercises, sets, weight and reps, with a live session
-  timer, 1–10 effort rating and notes
+  timer, 1–10 effort rating and notes. Each set carries what you lifted last
+  time, and is marked done deliberately — by tapping its check, pressing Next
+  off a filled set, or adopting the historical value
+- **Rest timers and supersets**: per-exercise rest with a sound and haptic
+  alert when it ends, anchored to the wall clock so backgrounding the app
+  doesn't lose time; supersetted exercises are ringed together and worked
+  through interleaved
 - **Exercise library**: 40 seeded exercises across 8 muscle groups and 6
   equipment types, plus your own; search and filter by muscle group
 - **Templates**: reusable workouts organized into folders, with default sets,
@@ -19,10 +25,13 @@ Built with Flutter · Riverpod (iOS & Android). The app lives in
   history, with a recommendation for each group
 - **Progress**: volume and workout frequency per week, muscle-group balance,
   personal records, and estimated 1RM per exercise over time
-- **Measurements**: body weight, body fat and circumference metrics charted
-  over time
-- **Backup**: export everything as JSON to the share sheet, and restore from a
-  backup file
+- **Measurements**: body weight, body fat and limb, waist and hip
+  circumferences. A session records every tracked measurement at once, each
+  field prefilled with what you last recorded; body weight charts a 7-day
+  trailing average over the daily readings
+- **Backup**: export everything as JSON to the share sheet and restore from a
+  backup file, or move the workout log in and out as CSV — imports are
+  Strong-compatible and additive
 
 Units are US throughout (pounds).
 
@@ -93,7 +102,7 @@ The revamp removed the server entirely. Along the way:
 
 ## Status
 
-`flutter analyze` is clean and the store's 25 tests pass:
+`flutter analyze` is clean and the store's 46 tests pass:
 
 ```bash
 cd client
@@ -101,10 +110,14 @@ flutter analyze
 flutter test
 ```
 
-Verified running on the iOS simulator.
+Coverage stops at the store: seeding, workouts, stats, recovery, templates,
+measurements, persistence, export/import and CSV are all tested, but there are
+no widget tests, so the screens rest on hands-on checking.
+
+Verified running on the iOS simulator and on device via TestFlight.
 
 ## Not yet included
 
 - Push notifications for recovery reminders (status is computed/shown in-app)
-- Rest timers between sets
+- Progress photos, and per-side tracking for limb measurements
 - Cross-device sync — by design; move data with an export/import
