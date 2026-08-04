@@ -7,7 +7,6 @@ import 'dashboard_screen.dart';
 import 'exercise_library_screen.dart';
 import 'settings_screen.dart';
 import 'templates/folder_list_screen.dart';
-import 'workout/log_workout_screen.dart';
 
 const _tabs = <GlassTab>[
   GlassTab(icon: Icon(Icons.home_outlined), label: 'Home'),
@@ -36,31 +35,23 @@ class _HomeScreenState extends State<HomeScreen> {
         bottom: false,
         child: Column(
           children: [
-            // The large title shares its row with the glass action buttons.
+            // Settings rides along with the title, and only on Home — the
+            // other tabs carry no chrome of their own. Starting a workout is
+            // the Home tab's call to action and the tap on a template, not a
+            // "+" that meant something different depending on which tab you
+            // happened to be looking at.
             LargeTitle(
               _titles[_index],
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  GlassIconButton(
-                    icon: const Icon(Icons.add),
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const LogWorkoutScreen(),
+              trailing: _index == 0
+                  ? GlassIconButton(
+                      icon: const Icon(Icons.settings_outlined),
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const SettingsScreen(),
+                        ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: AppSpacing.sm),
-                  GlassIconButton(
-                    icon: const Icon(Icons.settings_outlined),
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const SettingsScreen(),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+                    )
+                  : null,
             ),
             Expanded(
               child: IndexedStack(
