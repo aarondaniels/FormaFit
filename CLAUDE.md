@@ -10,9 +10,21 @@ All work happens in `client/` — the repo root holds only the README and this f
 cd client
 flutter pub get
 flutter analyze                  # must be clean; it is today
-flutter test                     # 46 tests, all in test/api_client_test.dart
+flutter test                     # 59 tests, all in test/api_client_test.dart
 flutter run                      # iOS simulator is the verified target
 ```
+
+**Alternating `flutter build ipa`/`build ios` with `flutter run` corrupts the
+build directory.** The release and simulator builds fight over `build/`, and the
+symptom is a runtime `Couldn't resolve native function 'DOBJC_initializeApi'` —
+native assets missing from the app bundle, not a code error. `flutter clean &&
+flutter pub get` fixes it. Note that `flutter clean` also deletes any IPA in
+`build/ios/ipa/`, so copy one aside before cleaning if it hasn't been uploaded.
+
+Installing a locally-signed build over a differently-signed one (TestFlight,
+say) makes iOS **delete and reinstall** rather than upgrade, which wipes the app
+container — and the container holds the entire store. Export a JSON backup
+before doing that to any device carrying real data.
 
 Run one test or one group by name:
 
@@ -35,11 +47,17 @@ is no network layer anywhere in the app. Don't add HTTP calls, auth, or caching
 layers on the assumption that a server exists — cross-device sync is
 deliberately out of scope, and export/import is the answer to "move my data".
 
-This one file is ~1,500 lines and holds both storage and every derived-value
+This one file is ~1,700 lines and holds both storage and every derived-value
 computation (stats, muscle recovery, personal records, 1RM progression, CSV
 import/export). Derived values are computed on read and never persisted, so
 they cannot drift from the underlying history — keep it that way rather than
 caching a computed field into the store.
+
+**The one exception is Apple Health data.** `Workout.activeEnergy`,
+`avgHeartRate` and `maxHeartRate` are *stored*, because they are observations
+from outside the app rather than anything recomputable from these records, and
+they must survive the Health permission being withdrawn. Don't "fix" them into
+derived values.
 
 ### Store invariants
 
@@ -55,7 +73,10 @@ These are load-bearing and easy to break by accident:
   whose `schema_version` is *newer* than this build — is renamed aside
   (`.corrupt-<ts>`) and a fresh seeded store takes its place.
 - **`_AppData.schemaVersion` is currently `1`.** Bump it for any breaking layout
-  change and migrate old files inside `_AppData.fromJson`.
+  change and migrate old files inside `_AppData.fromJson`. Adding a *nullable*
+  field is not breaking — `fromJson` tolerates missing keys, which is how the
+  Health metrics and the `health_sync_enabled` preference were added without a
+  bump. Only reshaping or removing existing keys needs one.
 - **Ids are `int` everywhere**, handed out by the monotonic `next*Id` counters on
   `_AppData`. Never reuse or renumber them; seeded library records and user
   records draw from the same counters.
@@ -101,6 +122,56 @@ Things in here that were deliberate and are worth not undoing:
   advancing to the next field is the whole point.
 - **Portrait is locked for this screen only**, in `initState`, and released in
   `dispose` (the Info.plist still declares landscape support app-wide).
+- **Completion is never inferred from the fields.** Typing a rep count means you
+  are entering a set, not that you finished it. Only three gestures set
+  `_SetEntry.completed`: tapping the check, pressing Next off a set holding both
+  a weight and reps, and tapping a historical value that fills the last blank.
+  All three start rest and jump focus to the *next set's weight* via
+  `_focusWeightAfter` — which for a superset is the next exercise in the group,
+  since `_focusOrder` already walks them interleaved (A1, B1, A2, B2).
+- Sets rehydrated from a saved workout open **already checked**; they were
+  performed. Template sets and new rows do not.
+- **The trailing control is the check, so removing a set is a swipe.** It used
+  to be the remove button, which meant tapping a green check deleted the set.
+- **`_VolumeBar` compares against the last session**: the bar fills toward that
+  session's total, while the figure beside it is set-matched — this session
+  against the *same number of sets* last time. A raw delta partway through an
+  exercise is only ever a large negative number.
+- **The workout date carries a real time of day**, and it is the session start:
+  Apple Health is queried for `[date, date + duration]`. `showDatePicker`
+  returns midnight, so anything editing the date must splice the old time back
+  in or the Health window silently moves to 00:00.
+
+### Apple Health
+
+[lib/health_sync.dart](client/lib/health_sync.dart) is the only bridge, and it
+is deliberately shaped so no caller needs a platform check: every entry point
+returns false or null off iOS, and `HealthSync.isSupported` gates the UI.
+Android's equivalent is Health Connect, a separate API that is not implemented.
+
+- **Off until the user turns it on** (`health_sync_enabled` in the store), since
+  enabling it triggers the system permission prompt. The Settings switch asks
+  for permission first and stays off if refused.
+- **Forma writes the workout but never the energy.** The watch is already
+  recording active energy for that window; writing our own would double-count it
+  in the activity rings.
+- **Written only on create, never on edit** — a second write for the same window
+  would show up as a duplicate session in Health.
+- **A missing reading is normal, not an error.** Health often takes minutes to
+  receive a session from the watch, which is why the workout screen offers a
+  refresh instead of treating the first answer as final, and why
+  `setWorkoutHealthMetrics` leaves a metric alone when passed null rather than
+  clearing it.
+- Everything fails soft. Sync off, permission refused, plugin throwing — all
+  return null, and none of them may cost the user the workout they just logged.
+- **The plugin forces a minimum iOS.** `health` needs 14.0; the floor is set to
+  15.0 to clear App Store Connect warning 90068. It lives in
+  `project.pbxproj` (three configs) *and* `ios/Podfile` — change both.
+- **`Runner.entitlements` is wired via `CODE_SIGN_ENTITLEMENTS`** in all three
+  Runner configs. It was orphaned before this — present but referenced nowhere,
+  so it silently did nothing. If an entitlement seems ignored, check that
+  setting first, and verify against the built app rather than the source file:
+  `codesign -d --entitlements - --xml <app> | plutil -p -`.
 
 ### UI conventions
 
@@ -116,6 +187,14 @@ Things in here that were deliberate and are worth not undoing:
   requires `LiquidGlassWidgets.initialize()` and the `wrap()` call in
   [lib/main.dart](client/lib/main.dart). Navigation is a four-tab `GlassTabBar`
   in `HomeScreen` (Home / Exercises / Templates / Progress).
+- **The tab title bar carries settings, and only on Home.** There is no global
+  "+": it meant "log a workout" everywhere while reading as "new template" on
+  Templates and "new exercise" on Exercises. Starting a workout has exactly two
+  entrances — the Home tab's `_StartWorkoutCta` and tapping a saved template.
+  Resist re-adding a title-bar action that means something different per tab.
+- `AsyncFailure`/`EmptyState` renders the raw error string and **overflows on a
+  long one** — a failing provider with a verbose message blows out the layout.
+  Known, unfixed.
 
 ### Data conventions
 
@@ -139,21 +218,34 @@ Things in here that were deliberate and are worth not undoing:
   the app has both cutters and bulkers, and coloring a gain red would
   congratulate half of them for the opposite of their goal. `kind` is a
   free-form string, so new kinds need no schema change.
+- **`VolumeComparison` measures work in whichever unit the exercise is loaded
+  with.** Tonnage (`weight × reps`) normally, but total *reps* when neither
+  session has a loaded set — bodyweight movements multiply out to zero, and a
+  progress bar that never fills is worse than none. One weighted set anywhere
+  keeps the whole exercise on tonnage, so a belt on the first set can't switch
+  units mid-exercise.
 
 ## Testing
 
-Only the store is covered — [test/api_client_test.dart](client/test/api_client_test.dart),
-39 tests across seeding, workouts, stats, recovery, templates, measurements,
-persistence, export/import and CSV. There are no widget tests.
+Only the store and pure computation are covered —
+[test/api_client_test.dart](client/test/api_client_test.dart), 59 tests across
+seeding, workouts, stats, recovery, templates, measurements, persistence,
+export/import, CSV, volume comparison and stored Health metrics. **There are no
+widget tests at all**, so every screen change rests on running the app.
 
 Tests swap in a `_FakePathProvider` pointing `path_provider` at a temp
 directory, so they never touch a real documents folder. Any new store behavior
 belongs here; note the existing tests for the concurrency and quarantine
 invariants above, which are the ones most likely to regress silently.
 
-## Note on the README
+`HealthSync` is untested — it wraps a plugin that needs a real device and a
+watch, and neither the simulator nor CI has either.
 
-[README.md](README.md) is accurate on architecture but stale on status: its "Not
-yet included" section still lists rest timers (shipped), and it says 25 tests
-(now 39). It also predates CSV import/export. Worth updating alongside any
-change to those areas.
+## Verifying UI changes
+
+There is no tap automation set up (`idb` is not installed), so driving the app
+means a human. `flutter run -d <simulator-id>` plus
+`xcrun simctl io <id> screenshot` confirms a screen renders and gets you a look
+at it, which catches layout errors and crashes but not interaction. Anything
+about *behavior* — completion gestures, focus order, Health — needs hands on the
+device. Say so rather than implying it was verified.
