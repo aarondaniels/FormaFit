@@ -2,34 +2,46 @@ PODS:
   - audioplayers_darwin (0.0.1):
     - Flutter
     - FlutterMacOS
+  - device_info_plus (0.0.1):
+    - Flutter
   - file_selector_ios (0.0.1):
     - Flutter
   - Flutter (1.0.0)
+  - health (13.3.1):
+    - Flutter
   - share_plus (0.0.1):
     - Flutter
 
 DEPENDENCIES:
   - audioplayers_darwin (from `.symlinks/plugins/audioplayers_darwin/darwin`)
+  - device_info_plus (from `.symlinks/plugins/device_info_plus/ios`)
   - file_selector_ios (from `.symlinks/plugins/file_selector_ios/ios`)
   - Flutter (from `Flutter`)
+  - health (from `.symlinks/plugins/health/ios`)
   - share_plus (from `.symlinks/plugins/share_plus/ios`)
 
 EXTERNAL SOURCES:
   audioplayers_darwin:
     :path: ".symlinks/plugins/audioplayers_darwin/darwin"
+  device_info_plus:
+    :path: ".symlinks/plugins/device_info_plus/ios"
   file_selector_ios:
     :path: ".symlinks/plugins/file_selector_ios/ios"
   Flutter:
     :path: Flutter
+  health:
+    :path: ".symlinks/plugins/health/ios"
   share_plus:
     :path: ".symlinks/plugins/share_plus/ios"
 
 SPEC CHECKSUMS:
   audioplayers_darwin: f15e209a3e856d1a7edcf98dc029f484fead2242
+  device_info_plus: bf2e3232933866d73fe290f2942f2156cdd10342
   file_selector_ios: 80c12e90ad3f2045ed6819d03742f1a4c5ec3f93
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  health: c1dfe8bc28ccd5998a32bdd0963943bfe9ac8320
   share_plus: 8b6f8b3447e494cca5317c8c3073de39b3600d1f
 
-PODFILE CHECKSUM: 4f1c12611da7338d21589c0b2ecd6bd20b109694
+PODFILE CHECKSUM: 1959d098c91d8a792531a723c4a9d7e9f6a01e38
 
 COCOAPODS: 1.16.2

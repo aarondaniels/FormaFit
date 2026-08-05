@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../api_client.dart';
+import '../health_sync.dart';
 import '../providers.dart';
 import '../theme/tokens.dart';
 import '../widgets/glass.dart';
@@ -23,6 +24,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Turning sync on asks for Health permission first, so the system prompt is
+  /// a direct response to the switch rather than a surprise elsewhere. If the
+  /// user declines, the switch stays off rather than claiming a sync that
+  /// cannot happen.
+  Future<void> _setHealthSync(bool enabled) async {
+    setState(() => _busy = true);
+    try {
+      if (enabled) {
+        final granted = await ref.read(healthSyncProvider).requestPermissions();
+        if (!granted) {
+          _report('Apple Health access was not granted.');
+          return;
+        }
+      }
+      await mutateWith(ref, (api) => api.setHealthSyncEnabled(enabled));
+    } catch (e) {
+      _report('Could not change Health sync: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   Future<void> _export() async {
@@ -290,6 +313,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ],
             ),
           ),
+          if (HealthSync.isSupported) ...[
+            const SizedBox(height: AppSpacing.lg),
+            GlassSection(
+              title: 'Apple Health',
+              child: SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: ref.watch(healthSyncEnabledProvider).value ?? false,
+                onChanged: _busy ? null : _setHealthSync,
+                title: const Text('Sync with Apple Health'),
+                subtitle: Text(
+                  'Saves each workout to Health so it counts toward your '
+                  'rings, and shows the energy and heart rate your watch '
+                  'recorded.',
+                  style: AppTypography.small.copyWith(
+                    color: AppColors.mutedOnDark,
+                  ),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: AppSpacing.lg),
           GlassSection(
             title: 'Workout log (CSV)',

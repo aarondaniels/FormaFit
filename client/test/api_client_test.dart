@@ -577,6 +577,187 @@ void main() {
     });
   });
 
+  group('health metrics', () {
+    Future<Workout> aWorkout(ApiClient api) => api.createWorkout(
+      date: DateTime(2026, 8, 4, 18, 30),
+      effortLevel: 7,
+      duration: 3600,
+      exercises: [
+        WorkoutExerciseDraft(
+          exerciseId: 1,
+          sets: [WorkoutSetDraft(weight: 100, reps: 10)],
+        ),
+      ],
+    );
+
+    test('a new workout starts with no health metrics', () async {
+      final api = ApiClient();
+      final w = await aWorkout(api);
+
+      expect(w.activeEnergy, isNull);
+      expect(w.avgHeartRate, isNull);
+      expect(w.maxHeartRate, isNull);
+    });
+
+    test('metrics are stored and survive a reload', () async {
+      final api = ApiClient();
+      final w = await aWorkout(api);
+      await api.setWorkoutHealthMetrics(
+        w.id,
+        activeEnergy: 412.5,
+        avgHeartRate: 118,
+        maxHeartRate: 156,
+      );
+
+      // A second client reads the file rather than the cache.
+      final reloaded = await ApiClient().getWorkout(w.id);
+      expect(reloaded!.activeEnergy, 412.5);
+      expect(reloaded.avgHeartRate, 118);
+      expect(reloaded.maxHeartRate, 156);
+    });
+
+    test('a partial reading never clears an earlier one', () async {
+      final api = ApiClient();
+      final w = await aWorkout(api);
+      await api.setWorkoutHealthMetrics(
+        w.id,
+        activeEnergy: 400,
+        avgHeartRate: 120,
+        maxHeartRate: 150,
+      );
+
+      // Health can answer with energy but no heart rate; that must not wipe
+      // heart rate that arrived earlier.
+      final after = await api.setWorkoutHealthMetrics(w.id, activeEnergy: 450);
+      expect(after.activeEnergy, 450);
+      expect(after.avgHeartRate, 120);
+      expect(after.maxHeartRate, 150);
+    });
+
+    test('editing a workout keeps its health metrics', () async {
+      final api = ApiClient();
+      final w = await aWorkout(api);
+      await api.setWorkoutHealthMetrics(w.id, activeEnergy: 400);
+
+      final edited = await api.updateWorkout(id: w.id, effortLevel: 9);
+      expect(edited.effortLevel, 9);
+      expect(edited.activeEnergy, 400);
+    });
+
+    test('the workout start time keeps its time of day', () async {
+      final api = ApiClient();
+      final w = await aWorkout(api);
+
+      // The Health window is [date, date + duration], so a date that collapsed
+      // to midnight would query the wrong hours.
+      expect(w.date.hour, 18);
+      expect(w.date.minute, 30);
+      expect(w.endsAt, DateTime(2026, 8, 4, 19, 30));
+    });
+
+    test('health sync is off until turned on, and then persists', () async {
+      final api = ApiClient();
+      expect(await api.healthSyncEnabled(), isFalse);
+
+      await api.setHealthSyncEnabled(true);
+      expect(await ApiClient().healthSyncEnabled(), isTrue);
+    });
+  });
+
+  group('volume comparison', () {
+    List<SetLoad> loads(List<(double?, int?)> pairs) => [
+      for (final p in pairs) (weight: p.$1, reps: p.$2),
+    ];
+
+    test('tonnage is summed across both sessions', () async {
+      final v = VolumeComparison.of(
+        current: loads([(100, 10), (100, 8)]),
+        previous: loads([(95, 10), (95, 10)]),
+      );
+
+      expect(v.current, 1800);
+      expect(v.previousTotal, 1900);
+      expect(v.repsOnly, isFalse);
+      expect(v.unit, 'lb');
+    });
+
+    test('pace compares against the same number of sets, not the total',
+        () async {
+      final v = VolumeComparison.of(
+        // One set done out of a planned three.
+        current: loads([(100, 10), (null, null), (null, null)]),
+        previous: loads([(95, 10), (95, 10), (95, 10)]),
+      );
+
+      expect(v.setsLogged, 1);
+      // Against the whole previous session this reads as a big deficit; against
+      // its first set it is a gain, which is the useful reading.
+      expect(v.previousTotal, 2850);
+      expect(v.previousAtPace, 950);
+      expect(v.paceDelta, 50);
+    });
+
+    test('pace is undefined before anything is logged', () async {
+      final v = VolumeComparison.of(
+        current: loads([(null, null)]),
+        previous: loads([(95, 10)]),
+      );
+
+      expect(v.setsLogged, 0);
+      expect(v.previousAtPace, isNull);
+      expect(v.paceDelta, isNull);
+    });
+
+    test('an unweighted exercise is measured in reps, not zero', () async {
+      final v = VolumeComparison.of(
+        current: loads([(null, 12), (null, 10)]),
+        previous: loads([(null, 10), (null, 10)]),
+      );
+
+      // Tonnage would be 0 on both sides and the bar would never move.
+      expect(v.repsOnly, isTrue);
+      expect(v.unit, 'reps');
+      expect(v.current, 22);
+      expect(v.previousTotal, 20);
+      expect(v.progress, greaterThan(1));
+    });
+
+    test('one loaded set keeps the whole exercise on tonnage', () async {
+      final v = VolumeComparison.of(
+        // Weighted pull-ups: some sets carry a belt, some don't.
+        current: loads([(25, 8), (null, 10)]),
+        previous: loads([(25, 6)]),
+      );
+
+      expect(v.repsOnly, isFalse);
+      expect(v.current, 200);
+      expect(v.previousTotal, 150);
+    });
+
+    test('a blank session against history still reads as weighted', () async {
+      final v = VolumeComparison.of(
+        current: loads([(null, null)]),
+        previous: loads([(100, 10)]),
+      );
+
+      // The unit must not flip to reps just because nothing is typed yet.
+      expect(v.repsOnly, isFalse);
+      expect(v.hasHistory, isTrue);
+      expect(v.progress, 0);
+    });
+
+    test('no history leaves nothing to compare', () async {
+      final v = VolumeComparison.of(
+        current: loads([(100, 10)]),
+        previous: const [],
+      );
+
+      expect(v.hasHistory, isFalse);
+      expect(v.previousAtPace, isNull);
+      expect(v.progress, 0);
+    });
+  });
+
   group('persistence', () {
     test('data survives a new client against the same file', () async {
       await ApiClient().createWorkout(

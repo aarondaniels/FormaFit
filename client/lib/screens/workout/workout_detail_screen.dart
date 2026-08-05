@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../health_sync.dart';
 import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
@@ -148,6 +149,7 @@ class WorkoutDetailScreen extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: AppSpacing.lg),
+              _HealthSection(workout: w),
               for (final we in w.exercises)
                 Padding(
                   padding: const EdgeInsets.only(bottom: AppSpacing.md),
@@ -159,6 +161,120 @@ class WorkoutDetailScreen extends ConsumerWidget {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+/// What the watch measured over this session.
+///
+/// Hidden entirely when sync is off or the platform has no Health, so the
+/// screen doesn't advertise a feature that isn't running. When sync is on but
+/// nothing has arrived, it offers a refresh instead: Health often takes a few
+/// minutes to receive a session from the watch, so the reading at save time is
+/// frequently missing rather than genuinely zero.
+class _HealthSection extends ConsumerStatefulWidget {
+  const _HealthSection({required this.workout});
+
+  final Workout workout;
+
+  @override
+  ConsumerState<_HealthSection> createState() => _HealthSectionState();
+}
+
+class _HealthSectionState extends ConsumerState<_HealthSection> {
+  bool _refreshing = false;
+
+  Future<void> _refresh() async {
+    setState(() => _refreshing = true);
+    try {
+      final metrics = await ref
+          .read(healthSyncProvider)
+          .readMetrics(
+            start: widget.workout.date,
+            end: widget.workout.endsAt,
+          );
+      if (metrics == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Apple Health has nothing for this session yet.'),
+            ),
+          );
+        }
+        return;
+      }
+      if (!mounted) return;
+      await mutateWith(
+        ref,
+        (api) => api.setWorkoutHealthMetrics(
+          widget.workout.id,
+          activeEnergy: metrics.activeEnergy,
+          avgHeartRate: metrics.avgHeartRate,
+          maxHeartRate: metrics.maxHeartRate,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!HealthSync.isSupported) return const SizedBox.shrink();
+    final enabled = ref.watch(healthSyncEnabledProvider).value ?? false;
+    if (!enabled) return const SizedBox.shrink();
+
+    final w = widget.workout;
+    final hasAny = w.activeEnergy != null || w.avgHeartRate != null;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.lg),
+      child: GlassSection(
+        title: 'Apple Health',
+        trailing: TextButton(
+          onPressed: _refreshing ? null : _refresh,
+          child: Text(_refreshing ? 'Checking…' : 'Refresh'),
+        ),
+        child: hasAny
+            ? Row(
+                children: [
+                  Expanded(
+                    child: StatTile(
+                      value: w.activeEnergy == null
+                          ? '—'
+                          : compactNumber(w.activeEnergy!),
+                      label: 'Active kcal',
+                      color: AppColors.accent,
+                    ),
+                  ),
+                  Expanded(
+                    child: StatTile(
+                      value: w.avgHeartRate == null
+                          ? '—'
+                          : '${w.avgHeartRate}',
+                      label: 'Avg bpm',
+                      color: AppColors.error,
+                    ),
+                  ),
+                  Expanded(
+                    child: StatTile(
+                      value: w.maxHeartRate == null
+                          ? '—'
+                          : '${w.maxHeartRate}',
+                      label: 'Max bpm',
+                      color: AppColors.warning,
+                    ),
+                  ),
+                ],
+              )
+            : Text(
+                'Nothing recorded for this session yet. Health can take a few '
+                'minutes to receive a workout from your watch.',
+                style: AppTypography.caption.copyWith(
+                  color: AppColors.mutedOnDark,
+                ),
+              ),
       ),
     );
   }

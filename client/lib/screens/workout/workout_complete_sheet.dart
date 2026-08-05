@@ -22,6 +22,31 @@ class PrHighlight {
   final int reps;
 }
 
+/// One exercise's work this session against the last time it was trained.
+class ExerciseVolumeChange {
+  const ExerciseVolumeChange({
+    required this.exerciseName,
+    required this.current,
+    required this.previous,
+    required this.unit,
+  });
+
+  final String exerciseName;
+  final double current;
+
+  /// The previous session's total, or null when this was the first time.
+  final double? previous;
+
+  /// "lb" for a loaded exercise, "reps" for one that carries no weight.
+  final String unit;
+
+  double? get delta => previous == null ? null : current - previous!;
+
+  /// Share gained or lost, null when there is nothing to compare against.
+  double? get ratio =>
+      (previous == null || previous == 0) ? null : current / previous!;
+}
+
 /// Everything the completion sheet renders, computed by the caller so the sheet
 /// stays a pure presentation of a finished workout.
 class WorkoutSummary {
@@ -34,12 +59,16 @@ class WorkoutSummary {
     required this.workoutsThisWeek,
     required this.weekStreak,
     required this.prs,
+    required this.volumeChanges,
   });
 
   final int exerciseCount;
   final int setCount;
   final double volume;
   final String durationLabel;
+
+  /// Per-exercise work against the previous session, in the order trained.
+  final List<ExerciseVolumeChange> volumeChanges;
 
   /// All-time and current-week completed workout counts, and the run of
   /// consecutive weeks with at least one workout ending this week.
@@ -103,6 +132,10 @@ class _WorkoutCompleteSheet extends StatelessWidget {
               if (hasPr) ...[
                 const SizedBox(height: AppSpacing.md),
                 _prCard(),
+              ],
+              if (summary.volumeChanges.isNotEmpty) ...[
+                const SizedBox(height: AppSpacing.md),
+                _volumeCard(),
               ],
               const SizedBox(height: AppSpacing.md),
               _milestoneCard(),
@@ -192,6 +225,35 @@ class _WorkoutCompleteSheet extends StatelessWidget {
           for (var i = 0; i < summary.prs.length; i++) ...[
             if (i > 0) const SizedBox(height: AppSpacing.sm),
             _PrRow(pr: summary.prs[i]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Per-exercise work against the previous session — the verdict on whether
+  /// the session moved forward, delivered once it is complete and the
+  /// comparison is finally like-for-like.
+  Widget _volumeCard() {
+    return GlassCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.trending_up, size: 18, color: AppColors.primary),
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                'Volume vs last time',
+                style: AppTypography.h5.copyWith(color: AppColors.onDark),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          for (var i = 0; i < summary.volumeChanges.length; i++) ...[
+            if (i > 0) const SizedBox(height: AppSpacing.sm),
+            _VolumeRow(change: summary.volumeChanges[i]),
           ],
         ],
       ),
@@ -317,6 +379,57 @@ class _PrRow extends StatelessWidget {
         Text(
           '${_formatWeight(pr.weight)} lb × ${pr.reps}',
           style: AppTypography.numeric.copyWith(color: AppColors.warning),
+        ),
+      ],
+    );
+  }
+}
+
+class _VolumeRow extends StatelessWidget {
+  const _VolumeRow({required this.change});
+
+  final ExerciseVolumeChange change;
+
+  @override
+  Widget build(BuildContext context) {
+    final delta = change.delta;
+    final ratio = change.ratio;
+
+    final (String trailing, Color color) = switch (delta) {
+      // No prior session to measure against — say so rather than implying a
+      // gain from nothing.
+      null => ('First time', AppColors.mutedOnDark),
+      0 => ('Matched', AppColors.mutedOnDark),
+      _ => (
+        '${delta > 0 ? '+' : '−'}${compactNumber(delta.abs())}'
+            '${ratio == null ? '' : '  (${((ratio - 1) * 100).round()}%)'}',
+        delta > 0 ? AppColors.success : AppColors.warning,
+      ),
+    };
+
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            change.exerciseName,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppTypography.body.copyWith(color: AppColors.onDark),
+          ),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        Text(
+          '${compactNumber(change.current)} ${change.unit}',
+          style: AppTypography.numeric.copyWith(color: AppColors.onDark),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        SizedBox(
+          width: 92,
+          child: Text(
+            trailing,
+            textAlign: TextAlign.end,
+            style: AppTypography.small.copyWith(color: color),
+          ),
         ),
       ],
     );

@@ -25,6 +25,7 @@ dependencies:
   # Plays the rest-timer completion chime; SystemSound.alert is a no-op in-app
   # on iOS, so a real audio player is the only way to get an audible cue.
   audioplayers: ^6.1.0
+  health: ^13.3.1
 
 dev_dependencies:
   flutter_test:

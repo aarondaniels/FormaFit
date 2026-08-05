@@ -2,10 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>$(AppIdentifierPrefix)com.forma.workout</string>
-	</array>
+	<!-- Reads active energy and heart rate for a session's window, and writes
+	     the session back as a strength-training workout. -->
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+	<key>com.apple.developer.healthkit.access</key>
+	<array/>
 </dict>
 </plist>
 

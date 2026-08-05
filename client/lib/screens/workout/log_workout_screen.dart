@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../api_client.dart';
+import '../../health_sync.dart';
 import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
@@ -574,7 +575,20 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       firstDate: DateTime(2000),
       lastDate: DateTime.now().add(const Duration(days: 1)),
     );
-    if (picked != null) setState(() => _date = picked);
+    if (picked == null) return;
+    // showDatePicker returns midnight, which would throw away the time of day.
+    // That time is the session's start, and Apple Health is queried for the
+    // window it opens, so moving a workout to another date has to keep it.
+    setState(() {
+      _date = DateTime(
+        picked.year,
+        picked.month,
+        picked.day,
+        _date.hour,
+        _date.minute,
+        _date.second,
+      );
+    });
   }
 
   Future<void> _save() async {
@@ -637,6 +651,10 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
           exercises: drafts,
         );
       });
+      // Mirror the session into Apple Health and pick up whatever the watch
+      // measured. Only on a fresh save — an edit would write a second,
+      // duplicate workout for the same window.
+      if (existing == null) await _syncToHealth(saved);
       // Celebrate a freshly completed workout with its highlights; editing an
       // existing one just returns to the detail without the fanfare.
       if (existing == null && mounted) {
@@ -659,6 +677,42 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     }
   }
 
+  /// Writes the finished session to Apple Health and stores back whatever the
+  /// watch measured over it.
+  ///
+  /// Entirely best-effort: sync being off, permission refused, or Health simply
+  /// not having synced from the watch yet are all ordinary outcomes, and none
+  /// of them should interrupt saving a workout. The workout screen offers a
+  /// refresh for the last of those.
+  Future<void> _syncToHealth(Workout saved) async {
+    try {
+      if (!HealthSync.isSupported) return;
+      final enabled = await ref.read(apiProvider).healthSyncEnabled();
+      if (!enabled) return;
+
+      final health = ref.read(healthSyncProvider);
+      await health.writeWorkout(start: saved.date, end: saved.endsAt);
+
+      final metrics = await health.readMetrics(
+        start: saved.date,
+        end: saved.endsAt,
+      );
+      if (metrics == null || !mounted) return;
+      await mutateWith(
+        ref,
+        (api) => api.setWorkoutHealthMetrics(
+          saved.id,
+          activeEnergy: metrics.activeEnergy,
+          avgHeartRate: metrics.avgHeartRate,
+          maxHeartRate: metrics.maxHeartRate,
+        ),
+      );
+    } catch (_) {
+      // Health is outside the app's control; a failure here is not the user's
+      // problem and must not cost them the workout they just logged.
+    }
+  }
+
   /// Gathers the highlights for the completion sheet: this session's totals,
   /// any exercise that beat its previous best, and where the workout lands in
   /// the all-time and weekly counts. Returns null if the store can't be read,
@@ -677,10 +731,55 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
         workoutsThisWeek: stats.workoutsThisWeek,
         weekStreak: stats.weekStreak,
         prs: _sessionPRs(saved, all, byId),
+        volumeChanges: _volumeChanges(saved, all, byId),
       );
     } catch (_) {
       return null;
     }
+  }
+
+  /// Each exercise's work this session against the most recent earlier session
+  /// that included it, in the order it was trained.
+  static List<ExerciseVolumeChange> _volumeChanges(
+    Workout saved,
+    List<Workout> all,
+    Map<int, Exercise> byId,
+  ) {
+    // Newest first, so the first earlier workout containing an exercise is the
+    // one to measure against.
+    final earlier = [...all.where((w) => w.id != saved.id)]
+      ..sort((a, b) => b.date.compareTo(a.date));
+
+    final changes = <ExerciseVolumeChange>[];
+    for (final we in saved.exercises) {
+      List<WorkoutSet>? previousSets;
+      for (final w in earlier) {
+        final match = w.exercises
+            .where((e) => e.exerciseId == we.exerciseId)
+            .firstOrNull;
+        if (match != null) {
+          previousSets = match.sets;
+          break;
+        }
+      }
+
+      final volume = VolumeComparison.of(
+        current: [for (final s in we.sets) (weight: s.weight, reps: s.reps)],
+        previous: [
+          for (final s in previousSets ?? const <WorkoutSet>[])
+            (weight: s.weight, reps: s.reps),
+        ],
+      );
+      changes.add(
+        ExerciseVolumeChange(
+          exerciseName: byId[we.exerciseId]?.name ?? 'Exercise',
+          current: volume.current,
+          previous: previousSets == null ? null : volume.previousTotal,
+          unit: volume.unit,
+        ),
+      );
+    }
+    return changes;
   }
 
   /// Exercises in [saved] whose best set beat that exercise's previous all-time
@@ -1195,6 +1294,10 @@ class _ExerciseCard extends ConsumerWidget {
               ),
             ],
           ),
+          if (lastSets != null && lastSets.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.sm),
+            _VolumeBar(entry: entry, lastSets: lastSets),
+          ],
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [
@@ -1253,6 +1356,95 @@ class _ExerciseCard extends ConsumerWidget {
         ),
       ),
       child: card,
+    );
+  }
+}
+
+/// Whole numbers with thousands separators — volumes run to four figures fast.
+String _volumeLabel(double value) =>
+    NumberFormat.decimalPattern().format(value.round());
+
+/// Work done on this exercise so far against the last time it was trained.
+///
+/// The bar fills toward the previous session's total, so a part-finished
+/// exercise reads as "not there yet" rather than as a deficit. The pace figure
+/// beside it is the honest comparison — this session against the same number of
+/// sets last time — since a raw delta at set one of four is only ever a large
+/// negative number.
+///
+/// Hidden entirely until the exercise has history to measure against.
+class _VolumeBar extends StatelessWidget {
+  const _VolumeBar({required this.entry, required this.lastSets});
+
+  final _ExerciseEntry entry;
+  final List<WorkoutSet> lastSets;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        for (final s in entry.sets) s.weightController,
+        for (final s in entry.sets) s.repsController,
+      ]),
+      builder: (context, _) {
+        final volume = VolumeComparison.of(
+          current: [
+            for (final s in entry.sets) (weight: s.weight, reps: s.reps),
+          ],
+          previous: [
+            for (final s in lastSets) (weight: s.weight, reps: s.reps),
+          ],
+        );
+        if (!volume.hasHistory) return const SizedBox.shrink();
+
+        final beaten = volume.current >= volume.previousTotal;
+        final tint = beaten ? AppColors.success : AppColors.primary;
+        final delta = volume.paceDelta;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${_volumeLabel(volume.current)}'
+                    ' / ${_volumeLabel(volume.previousTotal)} ${volume.unit}',
+                    style: AppTypography.small.copyWith(
+                      color: AppColors.mutedOnDark,
+                    ),
+                  ),
+                ),
+                if (delta != null && delta != 0)
+                  Text(
+                    '${delta > 0 ? '+' : '−'}'
+                    '${_volumeLabel(delta.abs())} vs pace',
+                    style: AppTypography.small.copyWith(
+                      color: delta > 0 ? AppColors.success : AppColors.warning,
+                    ),
+                  )
+                else if (beaten)
+                  Text(
+                    'Beat last session',
+                    style: AppTypography.small.copyWith(
+                      color: AppColors.success,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: volume.progress.clamp(0.0, 1.0),
+                minHeight: 5,
+                backgroundColor: AppColors.cta,
+                valueColor: AlwaysStoppedAnimation<Color>(tint),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

@@ -258,7 +258,9 @@ class WorkoutExercise {
 class Workout {
   final int id;
 
-  /// Calendar date the work was done. Time-of-day is not tracked.
+  /// When the session started. The date carries a real time of day — Apple
+  /// Health is queried for the window it opens — so anything that edits it must
+  /// preserve the time component.
   final DateTime date;
 
   /// 1–10 subjective effort.
@@ -273,6 +275,18 @@ class Workout {
   final int? duration;
   final List<WorkoutExercise> exercises;
 
+  /// Active energy in kilocalories, as measured by the watch over the session.
+  ///
+  /// Unlike stats or recovery this is *stored* rather than derived: it is an
+  /// observation from outside the app, not something recomputable from the
+  /// records here, and it must survive the permission being withdrawn. Null
+  /// when Health had nothing for the window, or sync is off.
+  final double? activeEnergy;
+
+  /// Average and peak heart rate across the session, in beats per minute.
+  final int? avgHeartRate;
+  final int? maxHeartRate;
+
   Workout({
     required this.id,
     required this.date,
@@ -281,6 +295,9 @@ class Workout {
     this.templateName,
     this.duration,
     required this.exercises,
+    this.activeEnergy,
+    this.avgHeartRate,
+    this.maxHeartRate,
   });
 
   factory Workout.fromJson(Map<String, dynamic> j) => Workout(
@@ -293,6 +310,11 @@ class Workout {
     exercises: (j['exercises'] as List? ?? [])
         .map((e) => WorkoutExercise.fromJson(e as Map<String, dynamic>))
         .toList(),
+    // Absent in files written before Health sync existed, which is why these
+    // are nullable and the schema version doesn't move.
+    activeEnergy: (j['active_energy'] as num?)?.toDouble(),
+    avgHeartRate: j['avg_heart_rate'] as int?,
+    maxHeartRate: j['max_heart_rate'] as int?,
   );
 
   Map<String, dynamic> toJson() => {
@@ -303,6 +325,9 @@ class Workout {
     'template_name': templateName,
     'duration': duration,
     'exercises': exercises.map((e) => e.toJson()).toList(),
+    'active_energy': activeEnergy,
+    'avg_heart_rate': avgHeartRate,
+    'max_heart_rate': maxHeartRate,
   };
 
   Workout copyWith({
@@ -313,6 +338,9 @@ class Workout {
     String? templateName,
     int? duration,
     List<WorkoutExercise>? exercises,
+    double? activeEnergy,
+    int? avgHeartRate,
+    int? maxHeartRate,
   }) => Workout(
     id: id ?? this.id,
     date: date ?? this.date,
@@ -321,7 +349,13 @@ class Workout {
     templateName: templateName ?? this.templateName,
     duration: duration ?? this.duration,
     exercises: exercises ?? this.exercises,
+    activeEnergy: activeEnergy ?? this.activeEnergy,
+    avgHeartRate: avgHeartRate ?? this.avgHeartRate,
+    maxHeartRate: maxHeartRate ?? this.maxHeartRate,
   );
+
+  /// End of the session's window, for querying Health.
+  DateTime get endsAt => date.add(Duration(seconds: duration ?? 0));
 
   int get exerciseCount => exercises.length;
 
@@ -646,6 +680,88 @@ class PersonalRecord {
     required this.achievedOn,
     required this.bestSetVolume,
   });
+}
+
+/// A weight/reps pair — what both a stored [WorkoutSet] and an in-progress set
+/// draft reduce to, so work done can be measured the same way during a session
+/// and after it is saved.
+typedef SetLoad = ({double? weight, int? reps});
+
+/// This session's work on one exercise against the last time it was trained.
+///
+/// "Work" is tonnage (weight × reps) for a loaded exercise, but total reps for
+/// one that carries no weight — pull-ups and push-ups multiply out to zero
+/// tonnage, and a bar that never fills is worse than no bar. [repsOnly] says
+/// which reading applies, and both sides are always measured the same way.
+class VolumeComparison {
+  const VolumeComparison({
+    required this.current,
+    required this.previousTotal,
+    required this.previousAtPace,
+    required this.setsLogged,
+    required this.repsOnly,
+  });
+
+  /// Work recorded so far this session.
+  final double current;
+
+  /// Work across the whole of the previous session; 0 with no history.
+  final double previousTotal;
+
+  /// Work in the previous session through its first [setsLogged] sets — the
+  /// like-for-like figure. Comparing a part-finished exercise against a whole
+  /// previous session only ever says "behind", which is true but useless.
+  ///
+  /// Null before anything is logged, or when there is no history.
+  final double? previousAtPace;
+
+  /// Sets this session carrying any value.
+  final int setsLogged;
+
+  final bool repsOnly;
+
+  static double _valueOf(SetLoad set, {required bool repsOnly}) => repsOnly
+      ? (set.reps ?? 0).toDouble()
+      : (set.weight ?? 0) * (set.reps ?? 0);
+
+  static bool _isLogged(SetLoad set) => set.weight != null || set.reps != null;
+
+  factory VolumeComparison.of({
+    required List<SetLoad> current,
+    required List<SetLoad> previous,
+  }) {
+    // One loaded set on either side makes this a weighted exercise; a session
+    // that is merely blank so far shouldn't flip the unit mid-workout.
+    final repsOnly = ![...current, ...previous].any(
+      (s) => (s.weight ?? 0) > 0,
+    );
+
+    double sum(Iterable<SetLoad> sets) =>
+        sets.fold(0.0, (total, s) => total + _valueOf(s, repsOnly: repsOnly));
+
+    final logged = current.where(_isLogged).length;
+    return VolumeComparison(
+      current: sum(current),
+      previousTotal: sum(previous),
+      previousAtPace: (logged == 0 || previous.isEmpty)
+          ? null
+          : sum(previous.take(logged)),
+      setsLogged: logged,
+      repsOnly: repsOnly,
+    );
+  }
+
+  bool get hasHistory => previousTotal > 0;
+
+  /// Share of the previous session's work done so far, uncapped so the caller
+  /// can style an overshoot.
+  double get progress => previousTotal <= 0 ? 0 : current / previousTotal;
+
+  /// Ahead (or behind) the previous session at this point in the exercise.
+  double? get paceDelta =>
+      previousAtPace == null ? null : current - previousAtPace!;
+
+  String get unit => repsOnly ? 'reps' : 'lb';
 }
 
 /// A single point on a time-series chart.

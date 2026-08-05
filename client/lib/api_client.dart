@@ -490,6 +490,53 @@ class ApiClient {
     });
   }
 
+  /// Records what the watch measured over a session.
+  ///
+  /// Kept separate from [updateWorkout] because it arrives later and from
+  /// elsewhere: Health may not have finished syncing when the workout is saved,
+  /// so this is called again when the user reopens the workout.
+  ///
+  /// A null argument leaves that metric alone rather than clearing it, so a
+  /// partial read can't wipe a good earlier one.
+  Future<Workout> setWorkoutHealthMetrics(
+    int id, {
+    double? activeEnergy,
+    int? avgHeartRate,
+    int? maxHeartRate,
+  }) {
+    return _mutate(() async {
+      final data = await _load();
+      final i = data.workouts.indexWhere((w) => w.id == id);
+      if (i == -1) throw StateError('No workout $id');
+      final updated = data.workouts[i].copyWith(
+        activeEnergy: activeEnergy,
+        avgHeartRate: avgHeartRate,
+        maxHeartRate: maxHeartRate,
+      );
+      data.workouts[i] = updated;
+      await _persist();
+      return updated;
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Preferences
+  // -------------------------------------------------------------------------
+
+  /// Whether workouts are mirrored to, and read back from, Apple Health.
+  ///
+  /// Off until the user turns it on, since enabling it triggers the system
+  /// permission prompt.
+  Future<bool> healthSyncEnabled() async => (await _load()).healthSyncEnabled;
+
+  Future<void> setHealthSyncEnabled(bool enabled) {
+    return _mutate(() async {
+      final data = await _load();
+      data.healthSyncEnabled = enabled;
+      await _persist();
+    });
+  }
+
   /// Turns drafts into stored records, assigning ids and normalizing set
   /// numbering so gaps left by deleted sets don't reach the file.
   List<WorkoutExercise> _materialize(
@@ -1589,6 +1636,7 @@ class _AppData {
     required this.folders,
     required this.templates,
     required this.measurements,
+    this.healthSyncEnabled = false,
   });
 
   /// A fresh store carrying the starter exercise library.
@@ -1643,6 +1691,9 @@ class _AppData {
       measurements: (json['measurements'] as List? ?? [])
           .map((e) => Measurement.fromJson(e as Map<String, dynamic>))
           .toList(),
+      // Absent in files written before Health sync existed; defaulting to off
+      // keeps an upgrade from silently opting anyone in.
+      healthSyncEnabled: json['health_sync_enabled'] as bool? ?? false,
     );
   }
 
@@ -1661,6 +1712,10 @@ class _AppData {
   List<TemplateFolder> folders;
   List<Template> templates;
   List<Measurement> measurements;
+
+  /// User preference: mirror workouts to Apple Health and read the watch's
+  /// measurements back.
+  bool healthSyncEnabled;
 
   /// Version of the on-disk JSON layout. Bump on breaking changes and migrate
   /// older files in [_AppData.fromJson].
@@ -1682,5 +1737,6 @@ class _AppData {
     'folders': folders.map((e) => e.toJson()).toList(),
     'templates': templates.map((e) => e.toJson()).toList(),
     'measurements': measurements.map((e) => e.toJson()).toList(),
+    'health_sync_enabled': healthSyncEnabled,
   };
 }

@@ -1,10 +1,20 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'api_client.dart';
+import 'health_sync.dart';
 import 'models.dart';
 
 /// Single shared in-device storage client.
 final apiProvider = Provider<ApiClient>((ref) => ApiClient());
+
+/// Apple Health bridge. Inert off iOS.
+final healthSyncProvider = Provider<HealthSync>((ref) => HealthSync());
+
+/// Whether the user has turned Health sync on.
+final healthSyncEnabledProvider = FutureProvider<bool>((ref) async {
+  ref.watch(storeRevisionProvider);
+  return ref.watch(apiProvider).healthSyncEnabled();
+});
 
 /// Bumped after every mutation so the derived providers below refetch.
 ///
