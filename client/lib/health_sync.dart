@@ -13,6 +13,7 @@ library;
 
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:health/health.dart';
 
 /// What the watch recorded over a session's window.
@@ -33,13 +34,22 @@ class HealthSync {
 
   final Health _health;
 
-  /// Read: what the watch measured. Write: the workout itself.
-  static const _readTypes = [
+  /// Energy and heart rate are read; workouts are both read (to spot one we
+  /// already wrote) and written.
+  ///
+  /// Each type appears exactly once. Listing WORKOUT twice — once READ, once
+  /// WRITE — registers only one of them, and the write access is the one that
+  /// goes missing.
+  static const _types = [
     HealthDataType.ACTIVE_ENERGY_BURNED,
     HealthDataType.HEART_RATE,
     HealthDataType.WORKOUT,
   ];
-  static const _writeTypes = [HealthDataType.WORKOUT];
+  static const _access = [
+    HealthDataAccess.READ,
+    HealthDataAccess.READ,
+    HealthDataAccess.READ_WRITE,
+  ];
 
   /// True where Health exists at all — everywhere but iOS this is false and the
   /// feature stays hidden.
@@ -62,37 +72,92 @@ class HealthSync {
     if (!isSupported) return false;
     try {
       await _ensureConfigured();
-      return await _health.requestAuthorization(
-        [..._readTypes, ..._writeTypes],
-        permissions: [
-          ...List.filled(_readTypes.length, HealthDataAccess.READ),
-          ...List.filled(_writeTypes.length, HealthDataAccess.WRITE),
-        ],
-      );
-    } catch (_) {
+      return await _health.requestAuthorization(_types, permissions: _access);
+    } catch (e) {
+      debugPrint('[health] authorization failed: $e');
       return false;
     }
   }
 
-  /// Saves a finished session to Health as strength training, so it counts
-  /// toward the activity rings and shows up alongside other exercise.
+  /// Whether Health will accept a workout from us.
   ///
-  /// Returns whether Health accepted it. Energy is deliberately not written:
-  /// the watch is already recording active energy for this period, and writing
-  /// our own would double-count it.
-  Future<bool> writeWorkout({
+  /// iOS reports write permission truthfully; read permission is deliberately
+  /// opaque for privacy, so this only speaks for writing.
+  Future<bool> canWriteWorkouts() async {
+    if (!isSupported) return false;
+    try {
+      await _ensureConfigured();
+      return await _health.hasPermissions(
+            [HealthDataType.WORKOUT],
+            permissions: [HealthDataAccess.WRITE],
+          ) ??
+          false;
+    } catch (e) {
+      debugPrint('[health] permission check failed: $e');
+      return false;
+    }
+  }
+
+  /// Saves a finished session to Health as strength training, so it appears in
+  /// the Fitness app and is visible to other health apps.
+  ///
+  /// Returns null on success or a short reason on failure — callers may choose
+  /// to ignore it, but it must be *available*, because a silently swallowed
+  /// failure here is indistinguishable from Health simply being quiet.
+  ///
+  /// Energy is deliberately not written: the watch is already recording active
+  /// energy for this period, and writing our own would double-count it.
+  ///
+  /// The activity type must be [HealthWorkoutActivityType.TRADITIONAL_STRENGTH_TRAINING].
+  /// `STRENGTH_TRAINING` is Android-only in this plugin and throws on iOS.
+  Future<String?> writeWorkout({
+    required DateTime start,
+    required DateTime end,
+  }) async {
+    if (!isSupported) return 'Apple Health is only available on iOS.';
+    if (!end.isAfter(start)) return 'The session has no duration.';
+    try {
+      await _ensureConfigured();
+      final ok = await _health.writeWorkoutData(
+        activityType:
+            HealthWorkoutActivityType.TRADITIONAL_STRENGTH_TRAINING,
+        start: start,
+        end: end,
+        title: 'Forma',
+      );
+      if (!ok) {
+        debugPrint('[health] writeWorkoutData returned false');
+        return 'Apple Health refused the workout. Check that Forma may write '
+            'Workouts in Settings → Health → Data Access & Devices.';
+      }
+      return null;
+    } catch (e) {
+      debugPrint('[health] write failed: $e');
+      return 'Could not save to Apple Health: $e';
+    }
+  }
+
+  /// Whether Health already holds a workout overlapping this window.
+  ///
+  /// Guards against writing a second copy — of our own earlier write, or of a
+  /// session recorded on the watch itself.
+  Future<bool> hasWorkoutInWindow({
     required DateTime start,
     required DateTime end,
   }) async {
     if (!isSupported || !end.isAfter(start)) return false;
     try {
       await _ensureConfigured();
-      return await _health.writeWorkoutData(
-        activityType: HealthWorkoutActivityType.STRENGTH_TRAINING,
-        start: start,
-        end: end,
+      final existing = await _health.getHealthDataFromTypes(
+        types: const [HealthDataType.WORKOUT],
+        startTime: start,
+        endTime: end,
       );
-    } catch (_) {
+      return existing.isNotEmpty;
+    } catch (e) {
+      debugPrint('[health] workout lookup failed: $e');
+      // Unknown is treated as "nothing there": failing to write is a worse
+      // outcome than a duplicate the user can delete.
       return false;
     }
   }
@@ -149,7 +214,8 @@ class HealthSync {
             : beats.reduce((a, b) => a > b ? a : b).round(),
       );
       return metrics.isEmpty ? null : metrics;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[health] read failed: $e');
       return null;
     }
   }

@@ -45,7 +45,7 @@
 	<key>NSHealthShareUsageDescription</key>
 	<string>Forma reads the energy burned and heart rate your Apple Watch recorded during a workout, so each session shows what you actually did rather than an estimate.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>Forma saves your workouts to Apple Health as strength training, so they count toward your activity rings and appear alongside your other exercise.</string>
+	<string>Forma saves your workouts to Apple Health as strength training, so each session appears in Fitness alongside your other exercise.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

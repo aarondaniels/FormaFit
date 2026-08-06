@@ -858,6 +858,34 @@ class ApiClient {
     return List.unmodifiable(summaries);
   }
 
+  /// Workout counts for the last [weeks] calendar weeks, oldest first and
+  /// ending with the current (possibly unfinished) week.
+  ///
+  /// **Dense**: a week with no training is a zero, not a missing entry. The
+  /// series on [WorkoutStats] omits empty weeks, which is fine for a trend line
+  /// but wrong here — a fortnight off would simply vanish, and noticing the
+  /// weeks you missed is the whole point of the view.
+  Future<List<TimePoint>> workoutsPerWeek({int weeks = 6}) async {
+    if (weeks < 1) return const [];
+    final data = await _load();
+    final thisWeek = _weekStart(DateTime.now());
+
+    // Stepping by calendar days rather than Duration(days: 7): a 7-day
+    // duration crosses a DST boundary as 167 or 169 hours and can land on the
+    // wrong date.
+    final counts = <DateTime, double>{
+      for (var i = weeks - 1; i >= 0; i--)
+        DateTime(thisWeek.year, thisWeek.month, thisWeek.day - 7 * i): 0,
+    };
+
+    for (final w in data.workouts) {
+      final week = _weekStart(w.date);
+      final existing = counts[week];
+      if (existing != null) counts[week] = existing + 1;
+    }
+    return _series(counts);
+  }
+
   /// Trailing average over [windowDays], for series noisy enough that the raw
   /// line hides the trend — body weight above all, where day-to-day water
   /// swings dwarf the change anyone is actually looking for.

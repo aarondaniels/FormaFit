@@ -185,15 +185,33 @@ class _HealthSection extends ConsumerStatefulWidget {
 class _HealthSectionState extends ConsumerState<_HealthSection> {
   bool _refreshing = false;
 
+  /// Sends this workout to Health if it isn't there, then pulls back whatever
+  /// the watch measured.
+  ///
+  /// Doubles as the repair path: a session logged while writing was broken
+  /// never reached Health, and this is how it gets there without re-logging.
   Future<void> _refresh() async {
     setState(() => _refreshing = true);
     try {
-      final metrics = await ref
-          .read(healthSyncProvider)
-          .readMetrics(
-            start: widget.workout.date,
-            end: widget.workout.endsAt,
-          );
+      final health = ref.read(healthSyncProvider);
+      final w = widget.workout;
+
+      if (!await health.hasWorkoutInWindow(start: w.date, end: w.endsAt)) {
+        final failure = await health.writeWorkout(
+          start: w.date,
+          end: w.endsAt,
+        );
+        if (failure != null) {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(failure)));
+          }
+          return;
+        }
+      }
+
+      final metrics = await health.readMetrics(start: w.date, end: w.endsAt);
       if (metrics == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -234,7 +252,7 @@ class _HealthSectionState extends ConsumerState<_HealthSection> {
         title: 'Apple Health',
         trailing: TextButton(
           onPressed: _refreshing ? null : _refresh,
-          child: Text(_refreshing ? 'Checking…' : 'Refresh'),
+          child: Text(_refreshing ? 'Syncing…' : 'Sync now'),
         ),
         child: hasAny
             ? Row(
@@ -270,7 +288,8 @@ class _HealthSectionState extends ConsumerState<_HealthSection> {
               )
             : Text(
                 'Nothing recorded for this session yet. Health can take a few '
-                'minutes to receive a workout from your watch.',
+                'minutes to receive a workout from your watch — "Sync now" '
+                'also sends this session to Health if it never arrived.',
                 style: AppTypography.caption.copyWith(
                   color: AppColors.mutedOnDark,
                 ),

@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forma/api_client.dart';
 import 'package:forma/models.dart';
+import 'package:forma/screens/workout/log_workout_screen.dart'
+    show moveSupersetBlock, restChimeAsset, supersetBlocks;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
@@ -574,6 +577,152 @@ void main() {
         ApiClient.rollingAverage([TimePoint(DateTime(2026, 7, 1), 180)]),
         isEmpty,
       );
+    });
+  });
+
+  group('workouts per week', () {
+    Future<void> logOn(ApiClient api, DateTime date) => api.createWorkout(
+      date: date,
+      effortLevel: 5,
+      exercises: [
+        WorkoutExerciseDraft(
+          exerciseId: 1,
+          sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+        ),
+      ],
+    );
+
+    DateTime mondayOf(DateTime d) => DateTime(
+      d.year,
+      d.month,
+      d.day,
+    ).subtract(Duration(days: d.weekday - DateTime.monday));
+
+    test('the window is dense and ends with the current week', () async {
+      final api = ApiClient();
+      final points = await api.workoutsPerWeek(weeks: 6);
+
+      expect(points, hasLength(6));
+      expect(points.last.date, mondayOf(DateTime.now()));
+      // Oldest first, exactly one week apart.
+      for (var i = 1; i < points.length; i++) {
+        expect(points[i].date.difference(points[i - 1].date).inDays, 7);
+      }
+      expect(points.every((p) => p.value == 0), isTrue);
+    });
+
+    test('an untrained week is a zero, not a gap', () async {
+      final api = ApiClient();
+      final thisWeek = mondayOf(DateTime.now());
+      // This week and three weeks back; the two weeks between stay empty.
+      await logOn(api, thisWeek.add(const Duration(days: 1)));
+      await logOn(api, thisWeek.subtract(const Duration(days: 20)));
+
+      final points = await api.workoutsPerWeek(weeks: 6);
+
+      expect(points, hasLength(6));
+      expect(points.last.value, 1);
+      expect(points[points.length - 4].value, 1);
+      // The skipped weeks are present and zero — the stats series would have
+      // dropped them, hiding the layoff entirely.
+      expect(points[points.length - 2].value, 0);
+      expect(points[points.length - 3].value, 0);
+    });
+
+    test('several workouts in one week stack up', () async {
+      final api = ApiClient();
+      final thisWeek = mondayOf(DateTime.now());
+      for (final d in [0, 2, 4]) {
+        await logOn(api, thisWeek.add(Duration(days: d)));
+      }
+
+      final points = await api.workoutsPerWeek(weeks: 6);
+      expect(points.last.value, 3);
+    });
+
+    test('workouts older than the window are excluded', () async {
+      final api = ApiClient();
+      final thisWeek = mondayOf(DateTime.now());
+      await logOn(api, thisWeek.subtract(const Duration(days: 70)));
+
+      final points = await api.workoutsPerWeek(weeks: 6);
+      expect(points.fold<double>(0, (s, p) => s + p.value), 0);
+    });
+
+    test('a nonsense window is empty rather than throwing', () async {
+      expect(await ApiClient().workoutsPerWeek(weeks: 0), isEmpty);
+    });
+  });
+
+  group('exercise reordering', () {
+    // (id, supersetGroup) stands in for a draft exercise.
+    List<(String, int?)> items(String spec) => [
+      for (final part in spec.split(' '))
+        part.contains(':')
+            ? (part.split(':')[0], int.parse(part.split(':')[1]))
+            : (part, null),
+    ];
+    int? groupOf((String, int?) e) => e.$2;
+    String render(List<(String, int?)> list) =>
+        list.map((e) => e.$1).join(' ');
+
+    test('ungrouped exercises are blocks of one', () {
+      final blocks = supersetBlocks(items('a b c'), groupOf);
+      expect(blocks.map((b) => b.length), [1, 1, 1]);
+    });
+
+    test('a contiguous run sharing a group is one block', () {
+      final blocks = supersetBlocks(items('a b:1 c:1 d'), groupOf);
+      expect(blocks.map((b) => b.map((e) => e.$1).join()), ['a', 'bc', 'd']);
+    });
+
+    test('the same group id apart stays two blocks', () {
+      // Contiguity is what matters — a stale id reused later must not glue two
+      // separated exercises into one draggable unit.
+      final blocks = supersetBlocks(items('a:1 b a:1'), groupOf);
+      expect(blocks.map((b) => b.length), [1, 1, 1]);
+    });
+
+    test('moving down uses the half-open index', () {
+      // Dropping block 0 after block 1 reports newIndex 2.
+      final moved = moveSupersetBlock(items('a b c'), groupOf, 0, 2);
+      expect(render(moved), 'b a c');
+    });
+
+    test('moving up keeps the reported index', () {
+      final moved = moveSupersetBlock(items('a b c'), groupOf, 2, 0);
+      expect(render(moved), 'c a b');
+    });
+
+    test('a superset travels whole and stays contiguous', () {
+      final moved = moveSupersetBlock(items('a b:1 c:1 d'), groupOf, 1, 0);
+      expect(render(moved), 'b c a d');
+    });
+
+    test('a single exercise cannot land inside a superset', () {
+      // 'd' can only go before or after the b/c block, never between them.
+      final moved = moveSupersetBlock(items('a b:1 c:1 d'), groupOf, 2, 1);
+      expect(render(moved), 'a d b c');
+      expect(
+        supersetBlocks(moved, groupOf).map((b) => b.length),
+        [1, 1, 2],
+      );
+    });
+
+    test('an out-of-range drag is ignored', () {
+      final original = items('a b');
+      expect(render(moveSupersetBlock(original, groupOf, 5, 0)), 'a b');
+    });
+  });
+
+  group('assets', () {
+    test('the rest chime key resolves to a bundled asset', () async {
+      // The chime silently stopped playing because the key asked for
+      // `assets/sounds/...` while the bundle holds `lib/assets/sounds/...`.
+      // A wrong key throws inside the audio player, where it looked exactly
+      // like a working alert with no sound.
+      final data = await rootBundle.load(restChimeAsset);
+      expect(data.lengthInBytes, greaterThan(0));
     });
   });
 

@@ -109,6 +109,16 @@ final statsProvider = FutureProvider<WorkoutStats>((ref) async {
   return ref.watch(apiProvider).stats();
 });
 
+/// Dense workout counts for the last N calendar weeks, oldest first — empty
+/// weeks included as zeros.
+final workoutsPerWeekProvider = FutureProvider.family<List<TimePoint>, int>((
+  ref,
+  weeks,
+) async {
+  ref.watch(storeRevisionProvider);
+  return ref.watch(apiProvider).workoutsPerWeek(weeks: weeks);
+});
+
 final muscleRecoveryProvider = FutureProvider<List<MuscleRecovery>>((
   ref,
 ) async {

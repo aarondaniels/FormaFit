@@ -18,6 +18,59 @@ import 'exercise_picker_sheet.dart';
 import 'template_picker_screen.dart';
 import 'workout_complete_sheet.dart';
 
+/// Groups items into contiguous runs sharing a non-null superset id, leaving
+/// ungrouped items as runs of one.
+///
+/// These are the units drag moves. Keeping a superset's members adjacent is not
+/// cosmetic: the focus traversal walks contiguous runs to interleave a group
+/// (A1, B1, A2, B2), so an exercise dropped into the middle of one would
+/// silently corrupt the order sets are worked through.
+///
+/// Generic over the item so the logic can be tested without the logger's
+/// private draft types.
+List<List<T>> supersetBlocks<T>(List<T> items, int? Function(T) groupOf) {
+  final blocks = <List<T>>[];
+  for (final item in items) {
+    final group = groupOf(item);
+    final previous = blocks.isEmpty ? null : blocks.last;
+    if (group != null &&
+        previous != null &&
+        groupOf(previous.last) == group) {
+      previous.add(item);
+    } else {
+      blocks.add([item]);
+    }
+  }
+  return blocks;
+}
+
+/// Moves the block at [oldIndex] to [newIndex] and flattens back to a flat
+/// list, taking the half-open index a reorderable list reports.
+List<T> moveSupersetBlock<T>(
+  List<T> items,
+  int? Function(T) groupOf,
+  int oldIndex,
+  int newIndex,
+) {
+  final blocks = supersetBlocks(items, groupOf);
+  if (oldIndex < 0 || oldIndex >= blocks.length) return items;
+  // A drop below the origin is reported against the list before removal.
+  var target = newIndex > oldIndex ? newIndex - 1 : newIndex;
+  target = target.clamp(0, blocks.length - 1);
+  final moved = blocks.removeAt(oldIndex);
+  blocks.insert(target, moved);
+  return [for (final block in blocks) ...block];
+}
+
+/// Asset key for the rest-timer chime.
+///
+/// The full key as declared in pubspec.yaml. `AssetSource` resolves against
+/// `AudioCache.prefix`, which defaults to `assets/`, so the player is given a
+/// prefix-free cache and this path must be complete. The mismatch is silent —
+/// a wrong key throws inside `play()` — which is why it is a named constant
+/// with a test asserting it resolves.
+const restChimeAsset = 'lib/assets/sounds/rest_complete.wav';
+
 /// Composes a workout in memory and writes it in one shot on save.
 ///
 /// Nothing is persisted until the user saves, so an abandoned session leaves
@@ -428,12 +481,17 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   Future<void> _fireRestAlert() async {
     HapticFeedback.heavyImpact();
     try {
-      final player = _restPlayer ??= AudioPlayer();
+      final player = _restPlayer ??= AudioPlayer()
+        // Default prefix is `assets/`; this project keeps its assets under
+        // `lib/assets/`, so the key is given in full instead.
+        ..audioCache = AudioCache(prefix: '');
       await player.stop();
-      await player.play(AssetSource('sounds/rest_complete.wav'));
-    } catch (_) {
-      // If audio playback fails for any reason, the haptic still fired — a
-      // silent alert beats a crash mid-workout.
+      await player.play(AssetSource(restChimeAsset));
+    } catch (e) {
+      // The haptic already fired, so a silent alert beats a crash mid-workout
+      // — but say so, rather than leaving a broken chime indistinguishable
+      // from a working one.
+      debugPrint('[rest] chime failed: $e');
     }
   }
 
@@ -691,7 +749,19 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       if (!enabled) return;
 
       final health = ref.read(healthSyncProvider);
-      await health.writeWorkout(start: saved.date, end: saved.endsAt);
+      // Skip the write if Health already has something covering this window —
+      // our own earlier attempt, or a session recorded on the watch itself.
+      final duplicate = await health.hasWorkoutInWindow(
+        start: saved.date,
+        end: saved.endsAt,
+      );
+      if (!duplicate) {
+        final failure = await health.writeWorkout(
+          start: saved.date,
+          end: saved.endsAt,
+        );
+        if (failure != null) debugPrint('[health] $failure');
+      }
 
       final metrics = await health.readMetrics(
         start: saved.date,
@@ -855,6 +925,89 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   static double _epley(double weight, int reps) =>
       reps <= 1 ? weight : weight * (1 + reps / 30.0);
 
+  /// The exercises grouped into the units that drag moves: a contiguous run
+  /// sharing a superset group is one block, and a standalone exercise is a
+  /// block of one.
+  ///
+  /// Dragging blocks rather than individual cards is what keeps a superset's
+  /// members adjacent. [_focusOrder] walks contiguous runs to build the
+  /// interleaved A1, B1, A2 traversal, so an exercise dropped into the middle
+  /// of a group would quietly corrupt it. Reordering *within* a group stays the
+  /// superset menu's job.
+  static List<List<_ExerciseEntry>> groupIntoBlocks(
+    List<_ExerciseEntry> entries,
+  ) => supersetBlocks(entries, (e) => e.supersetGroup);
+
+  void _onReorderBlocks(int oldIndex, int newIndex) {
+    setState(() {
+      final reordered = moveSupersetBlock(
+        _entries,
+        (e) => e.supersetGroup,
+        oldIndex,
+        newIndex,
+      );
+      _entries
+        ..clear()
+        ..addAll(reordered);
+    });
+  }
+
+  /// Picking a block up drops the number pad — it covers the bottom of the
+  /// list, which is exactly where you are usually dragging to.
+  void _onReorderStart(int _) {
+    HapticFeedback.mediumImpact();
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  /// One exercise card, wired to its position in [_entries].
+  ///
+  /// [dragIndex] is the *block* index the card belongs to, since drag moves
+  /// superset groups whole.
+  Widget _exerciseCardAt(int i, {required int dragIndex}) {
+    return _ExerciseCard(
+      entry: _entries[i],
+      dragIndex: dragIndex,
+      supersetColor: _supersetColor(_entries[i].supersetGroup),
+      // The first card has nothing above it, the last nothing below, to pair
+      // with.
+      canSupersetWithPrevious: i > 0,
+      canSupersetWithNext: i < _entries.length - 1,
+      onSupersetWithPrevious: () => _supersetWithPrevious(i),
+      onSupersetWithNext: () => _supersetWithNext(i),
+      onLeaveSuperset: () => _leaveSuperset(i),
+      onRestChanged: (v) => setState(() => _entries[i].restSeconds = v),
+      onStartRest: () => _startRest(_entries[i].restSeconds),
+      onSetCompleted: (s) => _completeSet(s, _entries[i].restSeconds),
+      onChanged: () => setState(() {}),
+      onRemove: () => setState(() {
+        _entries.removeAt(i).dispose();
+      }),
+    );
+  }
+
+  /// What follows the finger while dragging.
+  ///
+  /// A full card runs to several hundred pixels once it has sets in it, which
+  /// would blanket the list you are trying to aim at. This stands in a compact
+  /// summary instead, so the drop target stays visible.
+  Widget _dragProxy(Widget child, int index, Animation<double> animation) {
+    final blocks = groupIntoBlocks(_entries);
+    if (index < 0 || index >= blocks.length) return child;
+    final block = blocks[index];
+    final byId = ref.read(exercisesByIdProvider).value;
+
+    return Material(
+      color: Colors.transparent,
+      child: _CollapsedDragCard(
+        names: [
+          for (final e in block) byId?[e.exerciseId]?.name ?? 'Exercise',
+        ],
+        setCount: block.fold<int>(0, (n, e) => n + e.sets.length),
+        color: _supersetColor(block.first.supersetGroup) ?? AppColors.primary,
+      ),
+    );
+  }
+
   Future<bool> _confirmDiscard() async {
     if (_entries.isEmpty) return true;
     final ok = await showDialog<bool>(
@@ -903,6 +1056,16 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     final isLastField =
         activeField != null && order.isNotEmpty && order.last == activeField;
 
+    // Exercises grouped into the units drag moves, plus where each block starts
+    // in _entries so the cards keep addressing their own positions.
+    final blocks = groupIntoBlocks(_entries);
+    final blockStarts = <int>[];
+    var runningIndex = 0;
+    for (final block in blocks) {
+      blockStarts.add(runningIndex);
+      runningIndex += block.length;
+    }
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
@@ -938,93 +1101,129 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
         body: Column(
           children: [
             Expanded(
-              child: ListView(
-                padding: glassPagePadding(context),
-                children: [
-            if (_entries.isEmpty)
-              GlassCard(
-                padding: const EdgeInsets.all(AppSpacing.lg),
-                child: Column(
-                  children: [
-                    const Icon(
-                      Icons.fitness_center,
-                      size: 40,
-                      color: AppColors.cta,
+              // Slivers rather than a ListView: the exercise cards need to be
+              // a SliverReorderableList while the surrounding content stays
+              // ordinary boxes in the same scroll view.
+              child: CustomScrollView(
+                slivers: [
+                  SliverPadding(
+                    padding: EdgeInsets.fromLTRB(
+                      AppSpacing.md,
+                      glassTopInset(context) + AppSpacing.sm,
+                      AppSpacing.md,
+                      0,
                     ),
-                    const SizedBox(height: AppSpacing.md),
-                    Text(
-                      'No exercises yet',
-                      style: AppTypography.h5,
+                    sliver: SliverToBoxAdapter(
+                      child: _entries.isEmpty
+                          ? GlassCard(
+                              padding: const EdgeInsets.all(AppSpacing.lg),
+                              child: Column(
+                                children: [
+                                  const Icon(
+                                    Icons.fitness_center,
+                                    size: 40,
+                                    color: AppColors.cta,
+                                  ),
+                                  const SizedBox(height: AppSpacing.md),
+                                  Text('No exercises yet',
+                                      style: AppTypography.h5),
+                                  const SizedBox(height: AppSpacing.sm),
+                                  Text(
+                                    'Add exercises directly, or start from a '
+                                    'template.',
+                                    textAlign: TextAlign.center,
+                                    style: AppTypography.small.copyWith(
+                                      color: AppColors.mutedOnDark,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : const SizedBox.shrink(),
                     ),
-                    const SizedBox(height: AppSpacing.sm),
-                    Text(
-                      'Add exercises directly, or start from a template.',
-                      textAlign: TextAlign.center,
-                      style: AppTypography.small.copyWith(
-                        color: AppColors.mutedOnDark,
+                  ),
+                  SliverPadding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.md,
+                    ),
+                    sliver: SliverReorderableList(
+                      itemCount: blocks.length,
+                      onReorder: _onReorderBlocks,
+                      onReorderStart: _onReorderStart,
+                      proxyDecorator: _dragProxy,
+                      itemBuilder: (context, blockIndex) {
+                        final block = blocks[blockIndex];
+                        final start = blockStarts[blockIndex];
+                        return Column(
+                          // Keyed on the block's first entry, which is a stable
+                          // object across rebuilds; positions are not.
+                          key: ObjectKey(block.first),
+                          children: [
+                            for (var j = 0; j < block.length; j++)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                  bottom: AppSpacing.md,
+                                ),
+                                child: _exerciseCardAt(
+                                  start + j,
+                                  dragIndex: blockIndex,
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                  SliverPadding(
+                    padding: EdgeInsets.fromLTRB(
+                      AppSpacing.md,
+                      0,
+                      AppSpacing.md,
+                      glassBottomInset(context),
+                    ),
+                    sliver: SliverToBoxAdapter(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const SizedBox(height: AppSpacing.md),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: _addExercises,
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('Add exercise'),
+                                ),
+                              ),
+                              const SizedBox(width: AppSpacing.sm),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: _applyTemplate,
+                                  icon: const Icon(Icons.description_outlined),
+                                  label: const Text('Template'),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: AppSpacing.lg),
+                          _sessionDetails(),
+                          const SizedBox(height: AppSpacing.lg),
+                          TextField(
+                            controller: _notes,
+                            maxLines: 3,
+                            decoration: const InputDecoration(
+                              labelText: 'Workout notes',
+                            ),
+                          ),
+                          const SizedBox(height: AppSpacing.lg),
+                          FilledButton(
+                            onPressed: _saving ? null : _save,
+                            child: Text(_saving ? 'Saving…' : 'Save workout'),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
-              )
-            else
-              for (var i = 0; i < _entries.length; i++)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: AppSpacing.md),
-                  child: _ExerciseCard(
-                    entry: _entries[i],
-                    supersetColor: _supersetColor(_entries[i].supersetGroup),
-                    // The first card has nothing above it, the last nothing
-                    // below, to pair with.
-                    canSupersetWithPrevious: i > 0,
-                    canSupersetWithNext: i < _entries.length - 1,
-                    onSupersetWithPrevious: () => _supersetWithPrevious(i),
-                    onSupersetWithNext: () => _supersetWithNext(i),
-                    onLeaveSuperset: () => _leaveSuperset(i),
-                    onRestChanged: (v) =>
-                        setState(() => _entries[i].restSeconds = v),
-                    onStartRest: () => _startRest(_entries[i].restSeconds),
-                    onSetCompleted: (s) =>
-                        _completeSet(s, _entries[i].restSeconds),
-                    onChanged: () => setState(() {}),
-                    onRemove: () => setState(() {
-                      _entries.removeAt(i).dispose();
-                    }),
                   ),
-                ),
-            const SizedBox(height: AppSpacing.md),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _addExercises,
-                    icon: const Icon(Icons.add),
-                    label: const Text('Add exercise'),
-                  ),
-                ),
-                const SizedBox(width: AppSpacing.sm),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _applyTemplate,
-                    icon: const Icon(Icons.description_outlined),
-                    label: const Text('Template'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            _sessionDetails(),
-            const SizedBox(height: AppSpacing.lg),
-            TextField(
-              controller: _notes,
-              maxLines: 3,
-              decoration: const InputDecoration(labelText: 'Workout notes'),
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            FilledButton(
-              onPressed: _saving ? null : _save,
-              child: Text(_saving ? 'Saving…' : 'Save workout'),
-            ),
                 ],
               ),
             ),
@@ -1121,6 +1320,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
 class _ExerciseCard extends ConsumerWidget {
   const _ExerciseCard({
     required this.entry,
+    required this.dragIndex,
     required this.supersetColor,
     required this.canSupersetWithPrevious,
     required this.canSupersetWithNext,
@@ -1135,6 +1335,10 @@ class _ExerciseCard extends ConsumerWidget {
   });
 
   final _ExerciseEntry entry;
+
+  /// Index of the reorderable *block* this card sits in — a superset moves
+  /// whole, so every member of a group shares one drag index.
+  final int dragIndex;
 
   /// Non-null when this exercise belongs to a superset; the shared group color.
   final Color? supersetColor;
@@ -1228,6 +1432,20 @@ class _ExerciseCard extends ConsumerWidget {
             ),
           Row(
             children: [
+              // Drag starts from the grip, never from a long-press on the card
+              // — the set fields are read-only with their own tap handler, and
+              // a press anywhere would be ambiguous with them.
+              ReorderableDragStartListener(
+                index: dragIndex,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: AppSpacing.xs),
+                  child: Icon(
+                    Icons.drag_indicator,
+                    size: 20,
+                    color: AppColors.mutedOnDark,
+                  ),
+                ),
+              ),
               Expanded(
                 child: Text(
                   exercise?.name ?? 'Exercise',
@@ -1356,6 +1574,70 @@ class _ExerciseCard extends ConsumerWidget {
         ),
       ),
       child: card,
+    );
+  }
+}
+
+/// The compact stand-in that follows the finger while an exercise is dragged.
+///
+/// A superset shows every member, since the whole group travels together.
+class _CollapsedDragCard extends StatelessWidget {
+  const _CollapsedDragCard({
+    required this.names,
+    required this.setCount,
+    required this.color,
+  });
+
+  final List<String> names;
+  final int setCount;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: AppSpacing.md),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: AppSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: AppColors.darkBlue,
+        borderRadius: BorderRadius.circular(AppSpacing.radius),
+        border: Border.all(color: color, width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.4),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.drag_indicator, size: 20, color: color),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final name in names)
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTypography.h6,
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Text(
+            '$setCount ${setCount == 1 ? 'set' : 'sets'}',
+            style: AppTypography.small.copyWith(color: AppColors.mutedOnDark),
+          ),
+        ],
+      ),
     );
   }
 }

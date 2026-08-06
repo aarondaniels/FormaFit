@@ -34,10 +34,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     setState(() => _busy = true);
     try {
       if (enabled) {
-        final granted = await ref.read(healthSyncProvider).requestPermissions();
+        final health = ref.read(healthSyncProvider);
+        final granted = await health.requestPermissions();
         if (!granted) {
           _report('Apple Health access was not granted.');
           return;
+        }
+        // iOS answers the prompt without saying what was allowed, and it only
+        // ever asks once. Checking write access here means a refused workout
+        // permission is reported now rather than discovered as silence later.
+        if (!await health.canWriteWorkouts()) {
+          _report(
+            'Forma cannot write workouts yet. Enable it under Settings → '
+            'Health → Data Access & Devices → Forma.',
+          );
         }
       }
       await mutateWith(ref, (api) => api.setHealthSyncEnabled(enabled));
