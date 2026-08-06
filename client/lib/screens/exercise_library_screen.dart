@@ -96,11 +96,49 @@ class ExerciseLibraryScreen extends ConsumerWidget {
   }
 }
 
-class _FilterBar extends ConsumerWidget {
+class _FilterBar extends ConsumerStatefulWidget {
   const _FilterBar();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_FilterBar> createState() => _FilterBarState();
+}
+
+class _FilterBarState extends ConsumerState<_FilterBar> {
+  /// The search field needs a controller of its own.
+  ///
+  /// Without one, the field keeps its text internally and nothing can change
+  /// it: clearing the query on the notifier re-filtered the list and hid the
+  /// clear button while the typed text stayed on screen. It also seeds from the
+  /// current query, so the field agrees with the filter that deliberately
+  /// survives navigation.
+  late final TextEditingController _search = TextEditingController(
+    text: ref.read(exerciseFilterProvider).query,
+  );
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  /// Clears the field and the filter together.
+  void _clearQuery() {
+    _search.clear();
+    ref.read(exerciseFilterProvider.notifier).setQuery('');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // The query can also be reset from elsewhere — the empty state's "clear
+    // filters" — so follow the notifier rather than only our own button.
+    ref.listen<ExerciseFilter>(exerciseFilterProvider, (_, next) {
+      if (next.query == _search.text) return;
+      _search.value = TextEditingValue(
+        text: next.query,
+        selection: TextSelection.collapsed(offset: next.query.length),
+      );
+    });
+
     final filter = ref.watch(exerciseFilterProvider);
     final notifier = ref.read(exerciseFilterProvider.notifier);
     final groups = ref.watch(muscleGroupsInUseProvider).value ?? const [];
@@ -138,6 +176,7 @@ class _FilterBar extends ConsumerWidget {
             0,
           ),
           child: TextField(
+            controller: _search,
             onChanged: notifier.setQuery,
             decoration: InputDecoration(
               hintText: 'Search exercises',
@@ -146,7 +185,7 @@ class _FilterBar extends ConsumerWidget {
                   ? null
                   : IconButton(
                       icon: const Icon(Icons.clear),
-                      onPressed: () => notifier.setQuery(''),
+                      onPressed: _clearQuery,
                     ),
               isDense: true,
             ),
