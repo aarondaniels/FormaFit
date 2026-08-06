@@ -10,7 +10,7 @@ All work happens in `client/` — the repo root holds only the README and this f
 cd client
 flutter pub get
 flutter analyze                  # must be clean; it is today
-flutter test                     # 59 tests, all in test/api_client_test.dart
+flutter test                     # 73 tests, all in test/api_client_test.dart
 flutter run                      # iOS simulator is the verified target
 ```
 
@@ -59,6 +59,23 @@ from outside the app rather than anything recomputable from these records, and
 they must survive the Health permission being withdrawn. Don't "fix" them into
 derived values.
 
+### Fail soft, never fail silent
+
+Two separate features shipped broken because a `catch (_)` swallowed a hard,
+100%-reproducible error and left it looking like the feature was merely quiet:
+
+- Health writes threw `HealthException` on every save (wrong activity type) and
+  Health simply showed no data from Forma.
+- The rest chime threw `Unable to load asset` on every play; the haptic fired
+  from the line above, so the alert felt like it worked with the sound turned
+  down.
+
+Swallowing is right — a Health outage or a missing sound must not cost someone
+the workout they just logged — but the failure has to be *reachable*. Log it
+with `debugPrint`, or return a reason the caller can surface, and prefer
+reporting on paths the user explicitly triggered (a Settings toggle, a Sync
+button). An `catch (_)` with an empty body is how a bug hides for a release.
+
 ### Store invariants
 
 These are load-bearing and easy to break by accident:
@@ -104,8 +121,8 @@ involvement.
 ### The workout logger
 
 [lib/screens/workout/log_workout_screen.dart](client/lib/screens/workout/log_workout_screen.dart)
-is the largest and most intricate screen (~1,700 lines) and carries most of the
-app's real-time behavior. It composes a workout **entirely in memory**
+is the largest and most intricate screen (~2,300 lines, and overdue a split) and
+carries most of the app's real-time behavior. It composes a workout **entirely in memory**
 (`_ExerciseEntry` / `_SetEntry` drafts) and writes it in one shot on save, so an
 abandoned session leaves nothing half-logged. Editing an existing workout
 rehydrates the same drafts.
@@ -116,7 +133,22 @@ Things in here that were deliberate and are worth not undoing:
   decrementing counter, and the screen is a `WidgetsBindingObserver` — so
   backgrounding the app (which pauses the ticker) doesn't lose rest time.
 - **The chime is `audioplayers`, not `SystemSound.alert`**, which is a silent
-  no-op in-app on iOS. Asset: `lib/assets/sounds/rest_complete.wav`.
+  no-op in-app on iOS. Asset: `lib/assets/sounds/rest_complete.wav`, referenced
+  through the `restChimeAsset` constant with a test asserting it resolves.
+  `AssetSource` prefixes with `AudioCache.prefix` (default `assets/`), and this
+  project keeps assets under `lib/assets/`, so the player gets a prefix-free
+  cache and the full key. A mismatch throws inside `play()` and is invisible.
+- **Audio focus is `duckOthers`**, set once in `main.dart`. The default, `gain`,
+  claims to be the sole audio source and would stop the user's music every time
+  rest ended. `respectSilence` stays false so the chime is heard with the ring
+  switch off — it's an alert, not media.
+- **Exercises reorder by dragging whole superset blocks.** `supersetBlocks()`
+  groups contiguous runs sharing a group id, and the `SliverReorderableList`
+  moves those blocks — a member dropped inside another group would break the
+  interleaved focus traversal. Drag starts from a grip in the card header
+  (`ReorderableDragStartListener`), never a long-press: the set fields are
+  read-only with their own tap handler and would fight it. A `proxyDecorator`
+  substitutes a compact pill, since a real card is far too tall to drag.
 - **Set fields are read-only on purpose**, driven by the in-app `_NumberPad`
   instead of the system keyboard — iOS's number pad has no return key, and Enter
   advancing to the next field is the whole point.
@@ -164,6 +196,17 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
   clearing it.
 - Everything fails soft. Sync off, permission refused, plugin throwing — all
   return null, and none of them may cost the user the workout they just logged.
+- **The activity type must be `TRADITIONAL_STRENGTH_TRAINING`.** The plugin
+  classifies `STRENGTH_TRAINING` as Android-only and throws on iOS. Check
+  `_isOnIOS` in the plugin source before using any activity type; the two sets
+  overlap enough to look interchangeable and aren't.
+- **List each `HealthDataType` once** in `requestAuthorization`, using
+  `READ_WRITE` where both are needed. Naming a type twice — once READ, once
+  WRITE — registers only one, and write is the one that goes missing.
+- **Writing a workout does not move the activity rings.** Move comes from
+  `activeEnergyBurned` samples and Exercise from `appleExerciseTime`, both the
+  watch's own. Our write makes the session *appear* in Fitness and gives it a
+  name; it adds no energy by design. Don't promise rings in UI copy.
 - **The plugin forces a minimum iOS.** `health` needs 14.0; the floor is set to
   15.0 to clear App Store Connect warning 90068. It lives in
   `project.pbxproj` (three configs) *and* `ios/Podfile` — change both.
@@ -195,6 +238,12 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
 - `AsyncFailure`/`EmptyState` renders the raw error string and **overflows on a
   long one** — a failing provider with a verbose message blows out the layout.
   Known, unfixed.
+- **A search field needs its own `TextEditingController`.** Without one the
+  `TextField` owns its text privately and nothing can clear it: the exercise
+  library's clear button reset the filter — re-filtering the list and hiding the
+  button — while the typed text stayed on screen. Seed the controller from
+  current filter state, and `ref.listen` the notifier so resets triggered
+  elsewhere (an empty state's "clear filters") also reach the field.
 
 ### Data conventions
 
@@ -228,7 +277,7 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
 ## Testing
 
 Only the store and pure computation are covered —
-[test/api_client_test.dart](client/test/api_client_test.dart), 59 tests across
+[test/api_client_test.dart](client/test/api_client_test.dart), 73 tests across
 seeding, workouts, stats, recovery, templates, measurements, persistence,
 export/import, CSV, volume comparison and stored Health metrics. **There are no
 widget tests at all**, so every screen change rests on running the app.
