@@ -8,6 +8,7 @@ import '../health_sync.dart';
 import '../providers.dart';
 import '../theme/tokens.dart';
 import '../widgets/glass.dart';
+import '../workout_reminder.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -53,6 +54,35 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await mutateWith(ref, (api) => api.setHealthSyncEnabled(enabled));
     } catch (e) {
       _report('Could not change Health sync: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Same shape as Health: ask for permission as a direct answer to the
+  /// switch, and leave it off if the user says no rather than promising a
+  /// reminder that iOS will never deliver.
+  Future<void> _setWorkoutReminders(bool enabled) async {
+    setState(() => _busy = true);
+    try {
+      if (enabled) {
+        final granted = await ref
+            .read(workoutReminderProvider)
+            .requestPermission();
+        if (!granted) {
+          _report(
+            'Notifications are off for Forma. Turn them on under iOS '
+            'Settings → Notifications → Forma.',
+          );
+          return;
+        }
+      } else {
+        // Anything already pending would still arrive after the switch is off.
+        await ref.read(workoutReminderProvider).cancel();
+      }
+      await mutateWith(ref, (api) => api.setWorkoutRemindersEnabled(enabled));
+    } catch (e) {
+      _report('Could not change workout reminders: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -343,6 +373,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ],
+          if (WorkoutReminder.isSupported) ...[
+            const SizedBox(height: AppSpacing.lg),
+            GlassSection(
+              title: 'Reminders',
+              child: SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value:
+                    ref.watch(workoutRemindersEnabledProvider).value ?? false,
+                onChanged: _busy ? null : _setWorkoutReminders,
+                title: const Text('Unfinished workout reminder'),
+                subtitle: Text(
+                  'If a workout is left open for '
+                  '${WorkoutReminder.idleAfter.inMinutes} minutes without a '
+                  'change, Forma sends a notification so it does not sit there '
+                  'unsaved.',
+                  style: AppTypography.small.copyWith(
+                    color: AppColors.mutedOnDark,
+                  ),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: AppSpacing.lg),
           GlassSection(
             title: 'Workout log (CSV)',
@@ -432,10 +484,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: 'Danger zone',
             child: ListTile(
               contentPadding: EdgeInsets.zero,
-              leading: const Icon(
-                Icons.delete_forever,
-                color: AppColors.error,
-              ),
+              leading: const Icon(Icons.delete_forever, color: AppColors.error),
               title: const Text('Erase all data'),
               subtitle: Text(
                 'Deletes everything on this device.',
@@ -450,9 +499,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           Center(
             child: Text(
               'Forma · on-device workout tracking',
-              style: AppTypography.small.copyWith(
-                color: AppColors.mutedOnDark,
-              ),
+              style: AppTypography.small.copyWith(color: AppColors.mutedOnDark),
             ),
           ),
         ],

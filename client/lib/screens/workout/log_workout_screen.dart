@@ -7,12 +7,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../api_client.dart';
+import '../../audio_session.dart';
 import '../../health_sync.dart';
 import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
 import '../../widgets/rest.dart';
+import '../../workout_reminder.dart';
 import '../exercise_detail_screen.dart' show trimNumber;
 import 'exercise_picker_sheet.dart';
 import 'template_picker_screen.dart';
@@ -33,9 +35,7 @@ List<List<T>> supersetBlocks<T>(List<T> items, int? Function(T) groupOf) {
   for (final item in items) {
     final group = groupOf(item);
     final previous = blocks.isEmpty ? null : blocks.last;
-    if (group != null &&
-        previous != null &&
-        groupOf(previous.last) == group) {
+    if (group != null && previous != null && groupOf(previous.last) == group) {
       previous.add(item);
     } else {
       blocks.add([item]);
@@ -124,9 +124,30 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   /// repeated alerts don't spin up a new player each time.
   AudioPlayer? _restPlayer;
 
+  /// Watches the chime for its end, so the ducked audio session can be handed
+  /// back. Attached once, alongside the player it belongs to.
+  StreamSubscription<void>? _chimeEnded;
+
+  /// Backstop for the above: a chime that errors or never reports completion
+  /// would otherwise leave the user's music ducked for good.
+  Timer? _restReleaseTimer;
+
+  /// Notifies when this screen has been left open and untouched. Held rather
+  /// than read from `ref` on demand so [dispose] can still cancel.
+  late final WorkoutReminder _reminder;
+
+  /// Whether the user has reminders switched on. Read once when the logger
+  /// opens; a workout is short enough that re-reading it per tap is waste.
+  bool _remindersOn = false;
+
+  /// When the pending reminder was last pushed out, for throttling.
+  DateTime? _reminderArmedAt;
+
   @override
   void initState() {
     super.initState();
+    _reminder = ref.read(workoutReminderProvider);
+    unawaited(_armIdleReminder());
     // Logging a set is a portrait task — the number pad and set rows are laid
     // out for it — so lock out landscape while this screen is up and a mid-set
     // rotation can't reflow the keypad. Restored in dispose.
@@ -177,6 +198,39 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     }
   }
 
+  /// Starts the countdown to a "workout still in progress" notification, if the
+  /// user has asked for one.
+  ///
+  /// The alert is scheduled with the system rather than run off a [Timer]: the
+  /// case it exists for is a workout left open while the phone goes in a bag,
+  /// and iOS suspends the isolate seconds after backgrounding, so a Dart timer
+  /// would simply never fire. [_noteActivity] pushes the fire time out again on
+  /// every interaction, and [dispose] cancels it.
+  Future<void> _armIdleReminder() async {
+    if (!WorkoutReminder.isSupported) return;
+    final enabled = await ref.read(apiProvider).workoutRemindersEnabled();
+    // Permission can be revoked in iOS Settings after the switch was turned on,
+    // in which case scheduling would be accepted and never delivered.
+    if (!enabled || !await _reminder.hasPermission() || !mounted) return;
+    _remindersOn = true;
+    _noteActivity();
+  }
+
+  /// Pushes the idle reminder out another window. Called from a [Listener] over
+  /// the whole screen, so any touch counts as the workout still being tended.
+  void _noteActivity() {
+    if (!_remindersOn) return;
+    final now = DateTime.now();
+    final armed = _reminderArmedAt;
+    // Every tap would cross the platform channel dozens of times a set. A
+    // minute of slack is nothing against a thirty minute window.
+    if (armed != null && now.difference(armed) < const Duration(minutes: 1)) {
+      return;
+    }
+    _reminderArmedAt = now;
+    unawaited(_reminder.scheduleIdleReminder());
+  }
+
   /// Appends a template's exercises to the current entries, seeding each set
   /// with the template's defaults. Mutates state directly so it can be called
   /// from [initState]; callers already inside the widget tree wrap it in
@@ -207,7 +261,15 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     FocusManager.instance.removeListener(_onFocusChange);
     _ticker?.cancel();
     _restTicker?.cancel();
+    _restReleaseTimer?.cancel();
+    _chimeEnded?.cancel();
+    // Saved or discarded, the workout is no longer open — and a notification
+    // saying it still is would be worse than none. Unconditional, so a reminder
+    // armed before the setting was switched off still goes away.
+    unawaited(_reminder.cancel());
     _restPlayer?.dispose();
+    // Leaving the logger mid-chime shouldn't leave the session ducked either.
+    unawaited(AudioSession.deactivate());
     _notes.dispose();
     for (final e in _entries) {
       e.dispose();
@@ -406,7 +468,10 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   /// was performed — the same figure shown greyed under the field. Null when
   /// there is no matching historical set.
   String? _historicalValue(int exerciseId, int setIndex, bool isWeight) {
-    final last = ref.read(exerciseHistoryProvider(exerciseId)).value?.firstOrNull;
+    final last = ref
+        .read(exerciseHistoryProvider(exerciseId))
+        .value
+        ?.firstOrNull;
     if (last == null || setIndex >= last.sets.length) return null;
     final set = last.sets[setIndex];
     if (isWeight) {
@@ -446,8 +511,10 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       _restTotal = seconds;
       _restRemaining = seconds;
     });
-    _restTicker =
-        Timer.periodic(const Duration(seconds: 1), (_) => _tickRest());
+    _restTicker = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _tickRest(),
+    );
   }
 
   /// Recomputes the remaining rest from the wall clock and, on reaching zero,
@@ -485,6 +552,20 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
         // Default prefix is `assets/`; this project keeps its assets under
         // `lib/assets/`, so the key is given in full instead.
         ..audioCache = AudioCache(prefix: '');
+      // The chime ducks the user's music, and nothing in audioplayers ever
+      // un-ducks it — see AudioSession. Release the session once the sound has
+      // finished, and again if it never does, so a chime that fails to
+      // complete can't leave their music turned down for the rest of the
+      // workout.
+      _chimeEnded ??= player.onPlayerComplete.listen((_) {
+        _restReleaseTimer?.cancel();
+        AudioSession.deactivate();
+      });
+      _restReleaseTimer?.cancel();
+      _restReleaseTimer = Timer(
+        const Duration(seconds: 5),
+        AudioSession.deactivate,
+      );
       await player.stop();
       await player.play(AssetSource(restChimeAsset));
     } catch (e) {
@@ -492,6 +573,8 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       // — but say so, rather than leaving a broken chime indistinguishable
       // from a working one.
       debugPrint('[rest] chime failed: $e');
+      _restReleaseTimer?.cancel();
+      unawaited(AudioSession.deactivate());
     }
   }
 
@@ -562,9 +645,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     if (picked == null || picked.isEmpty) return;
     setState(() {
       for (final id in picked) {
-        _entries.add(
-          _ExerciseEntry(exerciseId: id, sets: [_SetEntry()]),
-        );
+        _entries.add(_ExerciseEntry(exerciseId: id, sets: [_SetEntry()]));
       }
     });
   }
@@ -670,8 +751,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
           // empty sets that would skew set counts.
           sets: [
             for (final s in e.sets)
-              if (!s.isEmpty)
-                WorkoutSetDraft(weight: s.weight, reps: s.reps),
+              if (!s.isEmpty) WorkoutSetDraft(weight: s.weight, reps: s.reps),
           ],
         ),
     ]..removeWhere((d) => d.sets.isEmpty);
@@ -999,9 +1079,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     return Material(
       color: Colors.transparent,
       child: _CollapsedDragCard(
-        names: [
-          for (final e in block) byId?[e.exerciseId]?.name ?? 'Exercise',
-        ],
+        names: [for (final e in block) byId?[e.exerciseId]?.name ?? 'Exercise'],
         setCount: block.fold<int>(0, (n, e) => n + e.sets.length),
         color: _supersetColor(block.first.supersetGroup) ?? AppColors.primary,
       ),
@@ -1074,181 +1152,193 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
           if (context.mounted) Navigator.of(context).pop();
         }
       },
-      child: Scaffold(
-        extendBodyBehindAppBar: true,
-        appBar: GlassAppBar(
-          leading: const GlassBackButton(icon: Icons.close),
-          title: Text(isEdit ? 'Edit workout' : 'Log workout'),
-          actions: [
-            if (elapsed != null)
-              Center(
-                child: Padding(
-                  padding: const EdgeInsets.only(right: AppSpacing.sm),
-                  child: Text(
-                    _formatElapsed(elapsed),
-                    style: AppTypography.numeric.copyWith(
-                      color: AppColors.primary,
-                    ),
-                  ),
-                ),
-              ),
-            GlassIconButton(
-              icon: const Icon(Icons.check),
-              onPressed: _saving ? null : _save,
-            ),
-          ],
-        ),
-        body: Column(
-          children: [
-            Expanded(
-              // Slivers rather than a ListView: the exercise cards need to be
-              // a SliverReorderableList while the surrounding content stays
-              // ordinary boxes in the same scroll view.
-              child: CustomScrollView(
-                slivers: [
-                  SliverPadding(
-                    padding: EdgeInsets.fromLTRB(
-                      AppSpacing.md,
-                      glassTopInset(context) + AppSpacing.sm,
-                      AppSpacing.md,
-                      0,
-                    ),
-                    sliver: SliverToBoxAdapter(
-                      child: _entries.isEmpty
-                          ? GlassCard(
-                              padding: const EdgeInsets.all(AppSpacing.lg),
-                              child: Column(
-                                children: [
-                                  const Icon(
-                                    Icons.fitness_center,
-                                    size: 40,
-                                    color: AppColors.cta,
-                                  ),
-                                  const SizedBox(height: AppSpacing.md),
-                                  Text('No exercises yet',
-                                      style: AppTypography.h5),
-                                  const SizedBox(height: AppSpacing.sm),
-                                  Text(
-                                    'Add exercises directly, or start from a '
-                                    'template.',
-                                    textAlign: TextAlign.center,
-                                    style: AppTypography.small.copyWith(
-                                      color: AppColors.mutedOnDark,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            )
-                          : const SizedBox.shrink(),
-                    ),
-                  ),
-                  SliverPadding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.md,
-                    ),
-                    sliver: SliverReorderableList(
-                      itemCount: blocks.length,
-                      onReorder: _onReorderBlocks,
-                      onReorderStart: _onReorderStart,
-                      proxyDecorator: _dragProxy,
-                      itemBuilder: (context, blockIndex) {
-                        final block = blocks[blockIndex];
-                        final start = blockStarts[blockIndex];
-                        return Column(
-                          // Keyed on the block's first entry, which is a stable
-                          // object across rebuilds; positions are not.
-                          key: ObjectKey(block.first),
-                          children: [
-                            for (var j = 0; j < block.length; j++)
-                              Padding(
-                                padding: const EdgeInsets.only(
-                                  bottom: AppSpacing.md,
-                                ),
-                                child: _exerciseCardAt(
-                                  start + j,
-                                  dragIndex: blockIndex,
-                                ),
-                              ),
-                          ],
-                        );
-                      },
-                    ),
-                  ),
-                  SliverPadding(
-                    padding: EdgeInsets.fromLTRB(
-                      AppSpacing.md,
-                      0,
-                      AppSpacing.md,
-                      glassBottomInset(context),
-                    ),
-                    sliver: SliverToBoxAdapter(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const SizedBox(height: AppSpacing.md),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  onPressed: _addExercises,
-                                  icon: const Icon(Icons.add),
-                                  label: const Text('Add exercise'),
-                                ),
-                              ),
-                              const SizedBox(width: AppSpacing.sm),
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  onPressed: _applyTemplate,
-                                  icon: const Icon(Icons.description_outlined),
-                                  label: const Text('Template'),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: AppSpacing.lg),
-                          _sessionDetails(),
-                          const SizedBox(height: AppSpacing.lg),
-                          TextField(
-                            controller: _notes,
-                            maxLines: 3,
-                            decoration: const InputDecoration(
-                              labelText: 'Workout notes',
-                            ),
-                          ),
-                          const SizedBox(height: AppSpacing.lg),
-                          FilledButton(
-                            onPressed: _saving ? null : _save,
-                            child: Text(_saving ? 'Saving…' : 'Save workout'),
-                          ),
-                        ],
+      // Any touch anywhere on the logger counts as the workout being tended,
+      // which is a truer signal than watching individual controls — scrolling
+      // through what you have done so far is activity too. Translucent and
+      // listen-only, so it never takes a gesture from the widgets below it.
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => _noteActivity(),
+        child: Scaffold(
+          extendBodyBehindAppBar: true,
+          appBar: GlassAppBar(
+            leading: const GlassBackButton(icon: Icons.close),
+            title: Text(isEdit ? 'Edit workout' : 'Log workout'),
+            actions: [
+              if (elapsed != null)
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: AppSpacing.sm),
+                    child: Text(
+                      _formatElapsed(elapsed),
+                      style: AppTypography.numeric.copyWith(
+                        color: AppColors.primary,
                       ),
                     ),
                   ),
-                ],
-              ),
-            ),
-            if (_restRemaining > 0)
-              _RestBar(
-                remaining: _restRemaining,
-                total: _restTotal,
-                onAdd: () => _adjustRest(15),
-                onSubtract: () => _adjustRest(-15),
-                onSkip: _skipRest,
-              ),
-            if (activeTarget != null)
-              _NumberPad(
-                decimalEnabled: activeTarget.isWeight,
-                isLastField: isLastField,
-                onKey: (k) => _typeInto(
-                  activeTarget.controller,
-                  activeTarget.isWeight,
-                  k,
                 ),
-                onBackspace: () => _backspaceIn(activeTarget.controller),
-                onEnter: () => _enterFromField(activeField!),
-                onCollapse: _collapseKeypad,
+              GlassIconButton(
+                icon: const Icon(Icons.check),
+                onPressed: _saving ? null : _save,
               ),
-          ],
+            ],
+          ),
+          body: Column(
+            children: [
+              Expanded(
+                // Slivers rather than a ListView: the exercise cards need to be
+                // a SliverReorderableList while the surrounding content stays
+                // ordinary boxes in the same scroll view.
+                child: CustomScrollView(
+                  slivers: [
+                    SliverPadding(
+                      padding: EdgeInsets.fromLTRB(
+                        AppSpacing.md,
+                        glassTopInset(context) + AppSpacing.sm,
+                        AppSpacing.md,
+                        0,
+                      ),
+                      sliver: SliverToBoxAdapter(
+                        child: _entries.isEmpty
+                            ? GlassCard(
+                                padding: const EdgeInsets.all(AppSpacing.lg),
+                                child: Column(
+                                  children: [
+                                    const Icon(
+                                      Icons.fitness_center,
+                                      size: 40,
+                                      color: AppColors.cta,
+                                    ),
+                                    const SizedBox(height: AppSpacing.md),
+                                    Text(
+                                      'No exercises yet',
+                                      style: AppTypography.h5,
+                                    ),
+                                    const SizedBox(height: AppSpacing.sm),
+                                    Text(
+                                      'Add exercises directly, or start from a '
+                                      'template.',
+                                      textAlign: TextAlign.center,
+                                      style: AppTypography.small.copyWith(
+                                        color: AppColors.mutedOnDark,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                    ),
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.md,
+                      ),
+                      sliver: SliverReorderableList(
+                        itemCount: blocks.length,
+                        onReorder: _onReorderBlocks,
+                        onReorderStart: _onReorderStart,
+                        proxyDecorator: _dragProxy,
+                        itemBuilder: (context, blockIndex) {
+                          final block = blocks[blockIndex];
+                          final start = blockStarts[blockIndex];
+                          return Column(
+                            // Keyed on the block's first entry, which is a stable
+                            // object across rebuilds; positions are not.
+                            key: ObjectKey(block.first),
+                            children: [
+                              for (var j = 0; j < block.length; j++)
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    bottom: AppSpacing.md,
+                                  ),
+                                  child: _exerciseCardAt(
+                                    start + j,
+                                    dragIndex: blockIndex,
+                                  ),
+                                ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                    SliverPadding(
+                      padding: EdgeInsets.fromLTRB(
+                        AppSpacing.md,
+                        0,
+                        AppSpacing.md,
+                        glassBottomInset(context),
+                      ),
+                      sliver: SliverToBoxAdapter(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const SizedBox(height: AppSpacing.md),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: _addExercises,
+                                    icon: const Icon(Icons.add),
+                                    label: const Text('Add exercise'),
+                                  ),
+                                ),
+                                const SizedBox(width: AppSpacing.sm),
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: _applyTemplate,
+                                    icon: const Icon(
+                                      Icons.description_outlined,
+                                    ),
+                                    label: const Text('Template'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: AppSpacing.lg),
+                            _sessionDetails(),
+                            const SizedBox(height: AppSpacing.lg),
+                            TextField(
+                              controller: _notes,
+                              maxLines: 3,
+                              decoration: const InputDecoration(
+                                labelText: 'Workout notes',
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.lg),
+                            FilledButton(
+                              onPressed: _saving ? null : _save,
+                              child: Text(_saving ? 'Saving…' : 'Save workout'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (_restRemaining > 0)
+                _RestBar(
+                  remaining: _restRemaining,
+                  total: _restTotal,
+                  onAdd: () => _adjustRest(15),
+                  onSubtract: () => _adjustRest(-15),
+                  onSkip: _skipRest,
+                ),
+              if (activeTarget != null)
+                _NumberPad(
+                  decimalEnabled: activeTarget.isWeight,
+                  isLastField: isLastField,
+                  onKey: (k) => _typeInto(
+                    activeTarget.controller,
+                    activeTarget.isWeight,
+                    k,
+                  ),
+                  onBackspace: () => _backspaceIn(activeTarget.controller),
+                  onEnter: () => _enterFromField(activeField!),
+                  onCollapse: _collapseKeypad,
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1550,9 +1640,7 @@ class _ExerciseCard extends ConsumerWidget {
               // Carry the previous set's values forward — most sets repeat the
               // one before them, so this is usually the right starting point.
               final prev = entry.sets.lastOrNull;
-              entry.sets.add(
-                _SetEntry(weight: prev?.weight, reps: prev?.reps),
-              );
+              entry.sets.add(_SetEntry(weight: prev?.weight, reps: prev?.reps));
               onChanged();
             },
             icon: const Icon(Icons.add, size: 18),
@@ -2105,14 +2193,14 @@ class _NumberPad extends StatelessWidget {
                                 children: [
                                   _key(
                                     label: '.',
-                                    onTap:
-                                        decimalEnabled ? () => onKey('.') : null,
+                                    onTap: decimalEnabled
+                                        ? () => onKey('.')
+                                        : null,
                                   ),
                                   _key(label: '0', onTap: () => onKey('0')),
                                   _key(
                                     onTap: onBackspace,
-                                    child:
-                                        const Icon(Icons.backspace_outlined),
+                                    child: const Icon(Icons.backspace_outlined),
                                   ),
                                 ],
                               ),
@@ -2154,15 +2242,14 @@ class _NumberPad extends StatelessWidget {
   /// One row of the digit grid; each key shares the width equally.
   Widget _row(List<String> labels) => Expanded(
     child: Row(
-      children: [
-        for (final l in labels) _key(label: l, onTap: () => onKey(l)),
-      ],
+      children: [for (final l in labels) _key(label: l, onTap: () => onKey(l))],
     ),
   );
 
   /// A key sized to share its row's width equally.
-  Widget _key({String? label, Widget? child, VoidCallback? onTap}) =>
-      Expanded(child: _button(label: label, child: child, onTap: onTap));
+  Widget _key({String? label, Widget? child, VoidCallback? onTap}) => Expanded(
+    child: _button(label: label, child: child, onTap: onTap),
+  );
 
   /// The visual key itself, filling whatever box it is given.
   Widget _button({
@@ -2282,9 +2369,7 @@ class _SetEntry {
     : weightController = TextEditingController(
         text: weight == null ? '' : trimNumber(weight),
       ),
-      repsController = TextEditingController(
-        text: reps?.toString() ?? '',
-      ),
+      repsController = TextEditingController(text: reps?.toString() ?? ''),
       completed = ValueNotifier(complete);
 
   final TextEditingController weightController;

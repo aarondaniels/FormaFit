@@ -5,6 +5,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forma/api_client.dart';
 import 'package:forma/models.dart';
+import 'package:forma/screens/measurements_screen.dart' show formatAge;
 import 'package:forma/screens/workout/log_workout_screen.dart'
     show moveSupersetBlock, restChimeAsset, supersetBlocks;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
@@ -175,69 +176,73 @@ void main() {
       expect(workout.exercises[1].restSeconds, 0);
     });
 
-    test('merging an exercise moves its history and deletes the source',
-        () async {
-      final api = ApiClient();
-      final dup = await api.createExercise(name: 'Bench Press');
-      // Log one workout under the duplicate, one under a seed exercise (1).
-      await api.createWorkout(
-        date: DateTime(2026, 7, 1),
-        effortLevel: 5,
-        exercises: [
-          WorkoutExerciseDraft(
-            exerciseId: dup.id,
-            sets: [WorkoutSetDraft(weight: 135, reps: 8)],
-          ),
-        ],
-      );
-      await api.createWorkout(
-        date: DateTime(2026, 7, 2),
-        effortLevel: 5,
-        exercises: [
-          WorkoutExerciseDraft(
-            exerciseId: 1,
-            sets: [WorkoutSetDraft(weight: 100, reps: 5)],
-          ),
-        ],
-      );
+    test(
+      'merging an exercise moves its history and deletes the source',
+      () async {
+        final api = ApiClient();
+        final dup = await api.createExercise(name: 'Bench Press');
+        // Log one workout under the duplicate, one under a seed exercise (1).
+        await api.createWorkout(
+          date: DateTime(2026, 7, 1),
+          effortLevel: 5,
+          exercises: [
+            WorkoutExerciseDraft(
+              exerciseId: dup.id,
+              sets: [WorkoutSetDraft(weight: 135, reps: 8)],
+            ),
+          ],
+        );
+        await api.createWorkout(
+          date: DateTime(2026, 7, 2),
+          effortLevel: 5,
+          exercises: [
+            WorkoutExerciseDraft(
+              exerciseId: 1,
+              sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+            ),
+          ],
+        );
 
-      await api.mergeExercise(sourceId: dup.id, targetId: 1);
+        await api.mergeExercise(sourceId: dup.id, targetId: 1);
 
-      // Source gone; both sessions now belong to exercise 1.
-      expect((await api.listExercises()).any((e) => e.id == dup.id), isFalse);
-      expect(await api.exerciseHistory(dup.id), isEmpty);
-      expect(await api.exerciseHistory(1), hasLength(2));
-    });
+        // Source gone; both sessions now belong to exercise 1.
+        expect((await api.listExercises()).any((e) => e.id == dup.id), isFalse);
+        expect(await api.exerciseHistory(dup.id), isEmpty);
+        expect(await api.exerciseHistory(1), hasLength(2));
+      },
+    );
 
-    test('merging folds duplicate entries within one workout into one',
-        () async {
-      final api = ApiClient();
-      final dup = await api.createExercise(name: 'Bench Press');
-      // A single workout containing both the duplicate and the target.
-      await api.createWorkout(
-        date: DateTime(2026, 7, 1),
-        effortLevel: 5,
-        exercises: [
-          WorkoutExerciseDraft(
-            exerciseId: 1,
-            sets: [WorkoutSetDraft(weight: 135, reps: 8)],
-          ),
-          WorkoutExerciseDraft(
-            exerciseId: dup.id,
-            sets: [WorkoutSetDraft(weight: 145, reps: 6)],
-          ),
-        ],
-      );
+    test(
+      'merging folds duplicate entries within one workout into one',
+      () async {
+        final api = ApiClient();
+        final dup = await api.createExercise(name: 'Bench Press');
+        // A single workout containing both the duplicate and the target.
+        await api.createWorkout(
+          date: DateTime(2026, 7, 1),
+          effortLevel: 5,
+          exercises: [
+            WorkoutExerciseDraft(
+              exerciseId: 1,
+              sets: [WorkoutSetDraft(weight: 135, reps: 8)],
+            ),
+            WorkoutExerciseDraft(
+              exerciseId: dup.id,
+              sets: [WorkoutSetDraft(weight: 145, reps: 6)],
+            ),
+          ],
+        );
 
-      await api.mergeExercise(sourceId: dup.id, targetId: 1);
+        await api.mergeExercise(sourceId: dup.id, targetId: 1);
 
-      final workout = (await api.listWorkouts()).single;
-      expect(workout.exercises, hasLength(1));
-      final entry = workout.exercises.single;
-      expect(entry.exerciseId, 1);
-      expect(entry.sets, hasLength(2));
-      expect(entry.sets.map((s) => s.setNumber), [1, 2]);
-    });
+        final workout = (await api.listWorkouts()).single;
+        expect(workout.exercises, hasLength(1));
+        final entry = workout.exercises.single;
+        expect(entry.exerciseId, 1);
+        expect(entry.sets, hasLength(2));
+        expect(entry.sets.map((s) => s.setNumber), [1, 2]);
+      },
+    );
 
     test('history for an exercise is newest first', () async {
       final api = ApiClient();
@@ -393,9 +398,7 @@ void main() {
       await api.createTemplate(
         folderId: folder.id,
         name: 'Bench day',
-        exercises: [
-          TemplateExercise(exerciseId: 1, order: 0, defaultSets: 3),
-        ],
+        exercises: [TemplateExercise(exerciseId: 1, order: 0, defaultSets: 3)],
       );
 
       await api.deleteFolder(folder.id);
@@ -663,8 +666,7 @@ void main() {
             : (part, null),
     ];
     int? groupOf((String, int?) e) => e.$2;
-    String render(List<(String, int?)> list) =>
-        list.map((e) => e.$1).join(' ');
+    String render(List<(String, int?)> list) => list.map((e) => e.$1).join(' ');
 
     test('ungrouped exercises are blocks of one', () {
       final blocks = supersetBlocks(items('a b c'), groupOf);
@@ -703,10 +705,7 @@ void main() {
       // 'd' can only go before or after the b/c block, never between them.
       final moved = moveSupersetBlock(items('a b:1 c:1 d'), groupOf, 2, 1);
       expect(render(moved), 'a d b c');
-      expect(
-        supersetBlocks(moved, groupOf).map((b) => b.length),
-        [1, 1, 2],
-      );
+      expect(supersetBlocks(moved, groupOf).map((b) => b.length), [1, 1, 2]);
     });
 
     test('an out-of-range drag is ignored', () {
@@ -804,12 +803,57 @@ void main() {
       expect(w.endsAt, DateTime(2026, 8, 4, 19, 30));
     });
 
+    test('a workout ages by calendar day, not elapsed hours', () async {
+      final api = ApiClient();
+      // 6:30pm, as aWorkout logs it.
+      final w = await aWorkout(api);
+
+      // Fourteen hours later is still "yesterday", and the same evening is
+      // still "today" — the trap a raw Duration difference falls into.
+      expect(w.daysSince(DateTime(2026, 8, 4, 23, 59)), 0);
+      expect(w.daysSince(DateTime(2026, 8, 5, 8, 30)), 1);
+      expect(w.daysSince(DateTime(2026, 8, 8, 0, 1)), 4);
+    });
+
+    test('workout age reads as Today / Yesterday / N days ago', () {
+      // The same wording the measurements screen uses, so one vocabulary
+      // covers both.
+      expect(formatAge(0), 'Today');
+      expect(formatAge(1), 'Yesterday');
+      expect(formatAge(4), '4 days ago');
+    });
+
     test('health sync is off until turned on, and then persists', () async {
       final api = ApiClient();
       expect(await api.healthSyncEnabled(), isFalse);
 
       await api.setHealthSyncEnabled(true);
       expect(await ApiClient().healthSyncEnabled(), isTrue);
+    });
+
+    test(
+      'workout reminders are off until turned on, and then persist',
+      () async {
+        final api = ApiClient();
+        expect(await api.workoutRemindersEnabled(), isFalse);
+
+        await api.setWorkoutRemindersEnabled(true);
+        expect(await ApiClient().workoutRemindersEnabled(), isTrue);
+      },
+    );
+
+    test('the two preferences are independent', () async {
+      final api = ApiClient();
+      await api.setWorkoutRemindersEnabled(true);
+
+      // Both live in the same file; writing one must not reset the other.
+      expect(await api.healthSyncEnabled(), isFalse);
+      await api.setHealthSyncEnabled(true);
+      await api.setWorkoutRemindersEnabled(false);
+
+      final reopened = ApiClient();
+      expect(await reopened.healthSyncEnabled(), isTrue);
+      expect(await reopened.workoutRemindersEnabled(), isFalse);
     });
   });
 
@@ -830,21 +874,23 @@ void main() {
       expect(v.unit, 'lb');
     });
 
-    test('pace compares against the same number of sets, not the total',
-        () async {
-      final v = VolumeComparison.of(
-        // One set done out of a planned three.
-        current: loads([(100, 10), (null, null), (null, null)]),
-        previous: loads([(95, 10), (95, 10), (95, 10)]),
-      );
+    test(
+      'pace compares against the same number of sets, not the total',
+      () async {
+        final v = VolumeComparison.of(
+          // One set done out of a planned three.
+          current: loads([(100, 10), (null, null), (null, null)]),
+          previous: loads([(95, 10), (95, 10), (95, 10)]),
+        );
 
-      expect(v.setsLogged, 1);
-      // Against the whole previous session this reads as a big deficit; against
-      // its first set it is a gain, which is the useful reading.
-      expect(v.previousTotal, 2850);
-      expect(v.previousAtPace, 950);
-      expect(v.paceDelta, 50);
-    });
+        expect(v.setsLogged, 1);
+        // Against the whole previous session this reads as a big deficit; against
+        // its first set it is a gain, which is the useful reading.
+        expect(v.previousTotal, 2850);
+        expect(v.previousAtPace, 950);
+        expect(v.paceDelta, 50);
+      },
+    );
 
     test('pace is undefined before anything is logged', () async {
       final v = VolumeComparison.of(
@@ -933,10 +979,9 @@ void main() {
       // Falls back to a fresh seeded store rather than throwing.
       expect(await api.listExercises(), hasLength(40));
 
-      final quarantined = dir
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.contains('.corrupt-'));
+      final quarantined = dir.listSync().whereType<File>().where(
+        (f) => f.path.contains('.corrupt-'),
+      );
       expect(quarantined, hasLength(1));
       expect(quarantined.single.readAsStringSync(), '{ this is not json');
     });
@@ -1066,32 +1111,32 @@ void main() {
       expect(push.effortLevel, 9);
     });
 
-    test('Strong-style names map onto the seed library, no duplicates',
-        () async {
-      final api = ApiClient();
-      final seedCount = (await api.listExercises()).length;
+    test(
+      'Strong-style names map onto the seed library, no duplicates',
+      () async {
+        final api = ApiClient();
+        final seedCount = (await api.listExercises()).length;
 
-      // Strong's "Movement (Equipment)" against Forma's "Equipment Movement",
-      // plus plural and bodyweight differences.
-      const csv =
-          'Date,Exercise Name,Weight,Reps\n'
-          '2026-07-01,Bench Press (Barbell),135,5\n'
-          '2026-07-01,Squat (Barbell),225,5\n'
-          '2026-07-01,Pull Up (Bodyweight),0,10\n'
-          '2026-07-01,Lat Pulldown (Cable),120,10\n'
-          '2026-07-01,Deadlift (Barbell),315,3\n';
+        // Strong's "Movement (Equipment)" against Forma's "Equipment Movement",
+        // plus plural and bodyweight differences.
+        const csv =
+            'Date,Exercise Name,Weight,Reps\n'
+            '2026-07-01,Bench Press (Barbell),135,5\n'
+            '2026-07-01,Squat (Barbell),225,5\n'
+            '2026-07-01,Pull Up (Bodyweight),0,10\n'
+            '2026-07-01,Lat Pulldown (Cable),120,10\n'
+            '2026-07-01,Deadlift (Barbell),315,3\n';
 
-      final result = await api.importWorkoutsCsv(csv, weightsInKg: false);
-      // All five resolve to existing seed exercises → none created.
-      expect(result.exercisesCreated, 0);
-      expect(await api.listExercises(), hasLength(seedCount));
-    });
+        final result = await api.importWorkoutsCsv(csv, weightsInKg: false);
+        // All five resolve to existing seed exercises → none created.
+        expect(result.exercisesCreated, 0);
+        expect(await api.listExercises(), hasLength(seedCount));
+      },
+    );
 
     test('equipment disambiguates variants that share a base', () async {
       final api = ApiClient();
-      final byName = {
-        for (final e in await api.listExercises()) e.name: e.id,
-      };
+      final byName = {for (final e in await api.listExercises()) e.name: e.id};
       // Seed has both "Barbell Bench Press" and "Dumbbell Bench Press".
       const csv =
           'Date,Exercise Name,Weight,Reps\n'
@@ -1120,7 +1165,8 @@ void main() {
           '2026-07-01,Legs,Squat,1,100,5\n';
 
       await api.importWorkoutsCsv(csv, weightsInKg: true);
-      final set = (await api.listWorkouts()).single.exercises.single.sets.single;
+      final set =
+          (await api.listWorkouts()).single.exercises.single.sets.single;
       expect(set.weight, closeTo(220.5, 0.1)); // 100 kg → 220.5 lb
     });
 
@@ -1131,7 +1177,8 @@ void main() {
           '2026-07-01,Deadlift,100,5\n';
 
       await api.importWorkoutsCsv(csv, weightsInKg: false);
-      final set = (await api.listWorkouts()).single.exercises.single.sets.single;
+      final set =
+          (await api.listWorkouts()).single.exercises.single.sets.single;
       expect(set.weight, closeTo(220.5, 0.1));
     });
 
@@ -1162,7 +1209,10 @@ void main() {
       final result = await fresh.importWorkoutsCsv(csv, weightsInKg: false);
       expect(result.workouts, 1);
       expect(result.sets, 1);
-      expect((await fresh.listWorkouts()).single.exercises.single.sets.single.weight, 100);
+      expect(
+        (await fresh.listWorkouts()).single.exercises.single.sets.single.weight,
+        100,
+      );
     });
   });
 

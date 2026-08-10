@@ -6,6 +6,7 @@ import '../models.dart';
 import '../providers.dart';
 import '../theme/tokens.dart';
 import '../widgets/glass.dart';
+import 'measurements_screen.dart' show formatAge;
 import 'workout/log_workout_screen.dart';
 import 'workout/workout_detail_screen.dart';
 
@@ -206,8 +207,7 @@ class _RecoverySection extends ConsumerWidget {
         final trained =
             groups.where((g) => g.status != RecoveryStatus.untrained).toList()
               ..sort(
-                (a, b) =>
-                    a.recoveryPercentage.compareTo(b.recoveryPercentage),
+                (a, b) => a.recoveryPercentage.compareTo(b.recoveryPercentage),
               );
         if (trained.isEmpty) return const SizedBox.shrink();
 
@@ -319,6 +319,10 @@ class _WorkoutRow extends StatelessWidget {
         ? 'No exercises'
         : names.take(3).join(' · ') +
               (names.length > 3 ? ' +${names.length - 3}' : '');
+    // How long ago leads the line: on a list of recent sessions it is the
+    // thing being scanned for, and a row titled with its template name carried
+    // no date at all before this.
+    final age = formatAge(workout.daysSince(DateTime.now()));
 
     return ListTile(
       contentPadding: EdgeInsets.zero,
@@ -331,11 +335,23 @@ class _WorkoutRow extends StatelessWidget {
         workout.templateName ?? DateFormat.MMMEd().format(workout.date),
         style: AppTypography.h6,
       ),
-      subtitle: Text(
-        subtitle,
+      subtitle: Text.rich(
+        TextSpan(
+          children: [
+            // The age is the brighter half of the line; the exercise list is
+            // supporting detail and stays muted.
+            TextSpan(
+              text: age,
+              style: AppTypography.small.copyWith(color: AppColors.onDark),
+            ),
+            TextSpan(
+              text: ' · $subtitle',
+              style: AppTypography.small.copyWith(color: AppColors.mutedOnDark),
+            ),
+          ],
+        ),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: AppTypography.small.copyWith(color: AppColors.mutedOnDark),
       ),
       trailing: Column(
         mainAxisAlignment: MainAxisAlignment.center,

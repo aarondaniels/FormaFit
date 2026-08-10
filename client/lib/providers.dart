@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'api_client.dart';
 import 'health_sync.dart';
 import 'models.dart';
+import 'workout_reminder.dart';
 
 /// Single shared in-device storage client.
 final apiProvider = Provider<ApiClient>((ref) => ApiClient());
@@ -14,6 +15,17 @@ final healthSyncProvider = Provider<HealthSync>((ref) => HealthSync());
 final healthSyncEnabledProvider = FutureProvider<bool>((ref) async {
   ref.watch(storeRevisionProvider);
   return ref.watch(apiProvider).healthSyncEnabled();
+});
+
+/// Schedules the "workout still open" notification. Inert off iOS.
+final workoutReminderProvider = Provider<WorkoutReminder>(
+  (ref) => const WorkoutReminder(),
+);
+
+/// Whether the user has turned idle workout reminders on.
+final workoutRemindersEnabledProvider = FutureProvider<bool>((ref) async {
+  ref.watch(storeRevisionProvider);
+  return ref.watch(apiProvider).workoutRemindersEnabled();
 });
 
 /// Bumped after every mutation so the derived providers below refetch.
@@ -229,11 +241,8 @@ final filteredExercisesProvider = FutureProvider<List<Exercise>>((ref) async {
 /// Muscle groups present in the library, for the filter chips.
 final muscleGroupsInUseProvider = FutureProvider<List<String>>((ref) async {
   final exercises = await ref.watch(exercisesProvider.future);
-  final groups = exercises
-      .map((e) => e.muscleGroup)
-      .whereType<String>()
-      .toSet()
-      .toList()
-    ..sort();
+  final groups =
+      exercises.map((e) => e.muscleGroup).whereType<String>().toSet().toList()
+        ..sort();
   return groups;
 });

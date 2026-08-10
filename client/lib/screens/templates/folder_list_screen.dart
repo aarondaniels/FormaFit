@@ -34,17 +34,29 @@ class _FolderListScreenState extends ConsumerState<FolderListScreen> {
     await _createFolderNamed(name);
   }
 
-  /// Creates a folder with a known name (from the search box) and clears the
-  /// search so the new folder shows in the full list.
+  /// Creates a folder with a known name, clears any search so it isn't
+  /// filtered out of the list behind you, and opens it.
+  ///
+  /// Opening it is the point: a folder is made to hold templates, and the next
+  /// thing anyone wants is the "New template" button inside it. Landing back on
+  /// a list of folders instead left the second step to be found on its own.
   Future<void> _createFolderNamed(String name) async {
     try {
-      await mutateWith(ref, (api) => api.createFolder(name: name));
-      if (mounted) {
-        setState(() {
-          _query = '';
-          _searchController.clear();
-        });
-      }
+      final folder = await mutateWith(
+        ref,
+        (api) => api.createFolder(name: name),
+      );
+      if (!mounted) return;
+      setState(() {
+        _query = '';
+        _searchController.clear();
+      });
+      if (!context.mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => TemplateListScreen(folder: folder),
+        ),
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -60,97 +72,117 @@ class _FolderListScreenState extends ConsumerState<FolderListScreen> {
     // All templates, to let a search by template name surface its folder.
     final templates = ref.watch(templatesProvider(null)).value ?? const [];
 
-    return Column(
-      children: [
-        // Search full-width; creating a folder is offered from the empty
-        // state when a search finds nothing.
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
-          child: TextField(
-            controller: _searchController,
-            onChanged: (v) => setState(() => _query = v),
-            decoration: InputDecoration(
-              hintText: 'Search templates',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: _query.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () => setState(() {
-                        _query = '';
-                        _searchController.clear();
-                      }),
+    return folders.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => AsyncFailure(
+        error: e,
+        onRetry: () => ref.read(storeRevisionProvider.notifier).bump(),
+      ),
+      data: (list) {
+        // Nothing saved yet: the whole tab is the instruction. No search field
+        // above it — an empty list is not something anyone means to search,
+        // and offering the box first made typing look like the way in.
+        if (list.isEmpty) {
+          return EmptyState(
+            icon: Icons.folder_outlined,
+            title: 'No templates yet',
+            message:
+                'A template is a workout you can start again — its exercises '
+                'and your usual sets, weight and reps.\n\n'
+                'Templates live in folders, so start with one: “Push / Pull / '
+                'Legs”, or just “My workouts”.',
+            action: FilledButton.icon(
+              onPressed: _createFolder,
+              icon: const Icon(Icons.create_new_folder_outlined),
+              label: const Text('New folder'),
+            ),
+          );
+        }
+
+        return Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchController,
+                      onChanged: (v) => setState(() => _query = v),
+                      decoration: InputDecoration(
+                        hintText: 'Search templates',
+                        prefixIcon: const Icon(Icons.search),
+                        suffixIcon: _query.isEmpty
+                            ? null
+                            : IconButton(
+                                icon: const Icon(Icons.clear),
+                                onPressed: () => setState(() {
+                                  _query = '';
+                                  _searchController.clear();
+                                }),
+                              ),
+                        isDense: true,
+                      ),
                     ),
-              isDense: true,
-            ),
-          ),
-        ),
-        Expanded(
-          child: folders.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => AsyncFailure(
-              error: e,
-              onRetry: () => ref.read(storeRevisionProvider.notifier).bump(),
-            ),
-            data: (list) {
-              if (list.isEmpty) {
-                return EmptyState(
-                  icon: Icons.folder_outlined,
-                  title: 'No template folders',
-                  message:
-                      'Folders group your saved workouts — a “Push / Pull / '
-                      'Legs” folder, for example.',
-                  action: FilledButton.icon(
+                  ),
+                  const SizedBox(width: AppSpacing.sm),
+                  // A standing way to add a folder. Creating one used to mean
+                  // typing a name the search could not match and taking the
+                  // offer in the empty state, which is no way to find a
+                  // feature. The tab bar deliberately carries no "+" (it would
+                  // mean something different per tab), so the action lives
+                  // here, next to the list it adds to.
+                  IconButton.filled(
+                    icon: const Icon(Icons.create_new_folder_outlined),
+                    tooltip: 'New folder',
                     onPressed: _createFolder,
-                    icon: const Icon(Icons.add),
-                    label: const Text('New folder'),
                   ),
-                );
-              }
+                ],
+              ),
+            ),
+            Expanded(child: _folderList(list, templates)),
+          ],
+        );
+      },
+    );
+  }
 
-              final q = _query.trim().toLowerCase();
-              final visible = q.isEmpty
-                  ? list
-                  : list.where((f) {
-                      if (f.name.toLowerCase().contains(q)) return true;
-                      return templates.any(
-                        (t) =>
-                            t.folderId == f.id &&
-                            t.name.toLowerCase().contains(q),
-                      );
-                    }).toList();
+  /// The filtered list, or an offer to create what was searched for.
+  Widget _folderList(List<TemplateFolder> list, List<Template> templates) {
+    final q = _query.trim().toLowerCase();
+    final visible = q.isEmpty
+        ? list
+        : list.where((f) {
+            if (f.name.toLowerCase().contains(q)) return true;
+            return templates.any(
+              (t) => t.folderId == f.id && t.name.toLowerCase().contains(q),
+            );
+          }).toList();
 
-              if (visible.isEmpty) {
-                final name = _query.trim();
-                return EmptyState(
-                  icon: Icons.create_new_folder_outlined,
-                  title: 'No matching templates',
-                  message:
-                      'Create a “$name” folder to group templates under it.',
-                  action: FilledButton.icon(
-                    onPressed: () => _createFolderNamed(name),
-                    icon: const Icon(Icons.add),
-                    label: Text('Create “$name” folder'),
-                  ),
-                );
-              }
-
-              return ListView.separated(
-                padding: EdgeInsets.fromLTRB(
-                  AppSpacing.md,
-                  AppSpacing.sm,
-                  AppSpacing.md,
-                  glassBottomInset(context),
-                ),
-                itemCount: visible.length,
-                separatorBuilder: (_, _) =>
-                    const SizedBox(height: AppSpacing.sm),
-                itemBuilder: (_, i) => _FolderCard(folder: visible[i]),
-              );
-            },
-          ),
+    if (visible.isEmpty) {
+      final name = _query.trim();
+      return EmptyState(
+        icon: Icons.create_new_folder_outlined,
+        title: 'No matching templates',
+        message: 'Create a “$name” folder to group templates under it.',
+        action: FilledButton.icon(
+          onPressed: () => _createFolderNamed(name),
+          icon: const Icon(Icons.add),
+          label: Text('Create “$name” folder'),
         ),
-      ],
+      );
+    }
+
+    return ListView.separated(
+      padding: EdgeInsets.fromLTRB(
+        AppSpacing.md,
+        AppSpacing.sm,
+        AppSpacing.md,
+        glassBottomInset(context),
+      ),
+      itemCount: visible.length,
+      separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.sm),
+      itemBuilder: (_, i) => _FolderCard(folder: visible[i]),
     );
   }
 }
@@ -194,8 +226,7 @@ class _FolderCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final count =
-        ref.watch(templatesProvider(folder.id)).value?.length ?? 0;
+    final count = ref.watch(templatesProvider(folder.id)).value?.length ?? 0;
 
     return GlassCard(
       padding: EdgeInsets.zero,

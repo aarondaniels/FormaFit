@@ -20,16 +20,7 @@ class MuscleGroups {
   static const glutes = 'Glutes';
   static const calves = 'Calves';
 
-  static const all = [
-    chest,
-    back,
-    shoulders,
-    arms,
-    legs,
-    core,
-    glutes,
-    calves,
-  ];
+  static const all = [chest, back, shoulders, arms, legs, core, glutes, calves];
 
   static const fallback = core;
 }
@@ -356,6 +347,19 @@ class Workout {
 
   /// End of the session's window, for querying Health.
   DateTime get endsAt => date.add(Duration(seconds: duration ?? 0));
+
+  /// Whole calendar days between this session and [now], for the "N days ago"
+  /// line. Matches `MeasurementSummary.daysSince`.
+  ///
+  /// Calendar days, not elapsed hours: a session logged at 8pm yesterday is
+  /// fourteen hours old and must still read "Yesterday" rather than "Today".
+  /// The workout date carries a real time of day, so the raw difference would
+  /// round the wrong way for most evening sessions.
+  int daysSince(DateTime now) => DateTime(
+    now.year,
+    now.month,
+    now.day,
+  ).difference(DateTime(date.year, date.month, date.day)).inDays;
 
   int get exerciseCount => exercises.length;
 
@@ -732,9 +736,7 @@ class VolumeComparison {
   }) {
     // One loaded set on either side makes this a weighted exercise; a session
     // that is merely blank so far shouldn't flip the unit mid-workout.
-    final repsOnly = ![...current, ...previous].any(
-      (s) => (s.weight ?? 0) > 0,
-    );
+    final repsOnly = ![...current, ...previous].any((s) => (s.weight ?? 0) > 0);
 
     double sum(Iterable<SetLoad> sets) =>
         sets.fold(0.0, (total, s) => total + _valueOf(s, repsOnly: repsOnly));
@@ -804,12 +806,9 @@ class MeasurementSummary {
   });
 
   /// Whole days since the last entry, for the "measured N days ago" line.
-  int daysSince(DateTime now) =>
-      DateTime(now.year, now.month, now.day)
-          .difference(
-            DateTime(latestDate.year, latestDate.month, latestDate.day),
-          )
-          .inDays;
+  int daysSince(DateTime now) => DateTime(now.year, now.month, now.day)
+      .difference(DateTime(latestDate.year, latestDate.month, latestDate.day))
+      .inDays;
 }
 
 class WorkoutStats {

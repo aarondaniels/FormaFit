@@ -10,7 +10,7 @@ All work happens in `client/` — the repo root holds only the README and this f
 cd client
 flutter pub get
 flutter analyze                  # must be clean; it is today
-flutter test                     # 73 tests, all in test/api_client_test.dart
+flutter test                     # 77 tests, all in test/api_client_test.dart
 flutter run                      # iOS simulator is the verified target
 ```
 
@@ -142,6 +142,19 @@ Things in here that were deliberate and are worth not undoing:
   claims to be the sole audio source and would stop the user's music every time
   rest ended. `respectSilence` stays false so the chime is heard with the ring
   switch off — it's an alert, not media.
+- **`audioplayers` never deactivates the iOS audio session, so the app has to.**
+  Ducking lasts as long as the session is active, and the plugin's one
+  `AVAudioSession.setActive` call (`controlAudioSession`, from
+  `onSoundComplete`) runs while the player still reports `isPlaying` — so it
+  re-activates on completion and nothing ever passes `false`. The symptom is the
+  user's music staying quiet long after the chime, coming back only when iOS
+  reclaims the session (backgrounding the app, or minutes later).
+  [lib/audio_session.dart](client/lib/audio_session.dart) is the missing half: a
+  `forma/audio_session` channel to `AppDelegate` calling `setActive(false,
+  options: .notifyOthersOnDeactivation)`. The logger fires it off
+  `onPlayerComplete`, with a 5s timer as a backstop for a chime that errors or
+  never completes. `setActive(false)` throws *is busy* if the tail is still
+  audible, hence the single retry.
 - **Exercises reorder by dragging whole superset blocks.** `supersetBlocks()`
   groups contiguous runs sharing a group id, and the `SliverReorderableList`
   moves those blocks — a member dropped inside another group would break the
@@ -216,6 +229,43 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
   setting first, and verify against the built app rather than the source file:
   `codesign -d --entitlements - --xml <app> | plutil -p -`.
 
+### Notifications
+
+[lib/workout_reminder.dart](client/lib/workout_reminder.dart) raises one alert
+and only one: the logger has been open and untouched for 30 minutes, so a
+workout is sitting there unsaved.
+
+- **They are local notifications, not push.** There is no backend and no
+  account, so there is nothing to push *from* — see "There is no backend". If a
+  reminder is ever asked for, it has to be something the device can schedule
+  against a clock by itself.
+- **The fire time belongs to iOS, not to a `Timer`.** The case this exists for
+  is a phone that went into a bag mid-session, and iOS suspends the isolate
+  seconds after backgrounding — a Dart timer would simply never run.
+  `UNTimeIntervalNotificationTrigger` delivers whether the app is foreground,
+  suspended or terminated.
+- **One pending request, reused id** (`forma.workout_idle`). Scheduling again
+  replaces it, which is what makes each interaction push the reminder out
+  another half hour instead of queueing a second alert.
+- **Activity is any touch**, caught by one `Listener` over the whole logger
+  rather than wired into individual controls — scrolling back through the
+  session counts as tending it. Rescheduling is throttled to once a minute,
+  since a tap-by-tap channel call would cross the boundary dozens of times a
+  set.
+- **`dispose` cancels unconditionally**, delivered ones included. A saved
+  workout that still gets told it is "in progress" is worse than no reminder.
+- **The app takes `UNUserNotificationCenter.delegate`** in `AppDelegate` and
+  overrides `willPresent`. Without a delegate iOS drops anything that comes due
+  while the app is frontmost, and untouched-but-visible is exactly the case
+  here. `FlutterAppDelegate` already conforms and stubs `willPresent`, so it is
+  an `override` and must not be restated in the conformance list. If a
+  notification plugin is ever added, it will want the same delegate.
+- Off until the user turns it on, like Health sync, and for the same reason:
+  the switch triggers the permission prompt. It also re-checks `hasPermission`
+  when the logger opens — permission can be revoked in iOS Settings long after
+  the switch was flipped, and scheduling would otherwise be accepted and never
+  delivered.
+
 ### UI conventions
 
 - [lib/theme/tokens.dart](client/lib/theme/tokens.dart) is the single source of
@@ -235,6 +285,22 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
   Templates and "new exercise" on Exercises. Starting a workout has exactly two
   entrances — the Home tab's `_StartWorkoutCta` and tapping a saved template.
   Resist re-adding a title-bar action that means something different per tab.
+- **No title-bar "+" does not mean no way to create.** Because the title bar
+  carries nothing, a tab that only offers creation through "search for a name
+  that matches nothing, then take the offer in the empty state" has effectively
+  hidden the feature — that is exactly how the Templates tab shipped, and it
+  reads as if searching is the way in. A tab that owns a list needs a standing
+  create action **in its own body**: `IconButton.filled` beside the search
+  field on `FolderListScreen`, a `FloatingActionButton.extended` on
+  `TemplateListScreen`, which has a Scaffold of its own. The exercise library
+  still has the old shape and would benefit from the same treatment.
+- **Search appears only when there is something to search.** `FolderListScreen`
+  renders no field at all when there are no folders: an empty list plus a
+  search box reads as "type here to begin". The empty state alone, with one
+  labelled button, is the whole instruction.
+- **Creating a folder opens it.** A folder exists to hold templates, so the
+  next thing wanted is the "New template" button inside it. This applies to
+  both entrances (the empty state's button and the search-no-match offer).
 - `AsyncFailure`/`EmptyState` renders the raw error string and **overflows on a
   long one** — a failing provider with a verbose message blows out the layout.
   Known, unfixed.
@@ -258,6 +324,12 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
   copies the current file aside first, and the UI must confirm before calling it.
 - Muscle-group recovery windows live in `_recoveryHours`; free-form group
   strings map onto the eight tracked groups via `_muscleAliases`.
+- **Ages are counted in calendar days, never elapsed hours.** `formatAge` in
+  [measurements_screen.dart](client/lib/screens/measurements_screen.dart) is the
+  one vocabulary ("Today" / "Yesterday" / "N days ago"), and both
+  `Workout.daysSince` and `MeasurementSummary.daysSince` floor to midnight
+  before subtracting. A workout date carries a real time of day, so a raw
+  `Duration` would call an 8pm session fourteen hours later "Today". Tested.
 - **Measurements are entered as a batch**, not one value at a time — the sheet
   covers every tracked kind and saves through `createMeasurements` as a single
   queued write. `measurementSummaries()` drives the overview and only reports
@@ -277,10 +349,11 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
 ## Testing
 
 Only the store and pure computation are covered —
-[test/api_client_test.dart](client/test/api_client_test.dart), 73 tests across
+[test/api_client_test.dart](client/test/api_client_test.dart), 77 tests across
 seeding, workouts, stats, recovery, templates, measurements, persistence,
-export/import, CSV, volume comparison and stored Health metrics. **There are no
-widget tests at all**, so every screen change rests on running the app.
+export/import, CSV, volume comparison, stored Health metrics, preferences and
+workout age. **There are no widget tests at all**, so every screen change rests
+on running the app.
 
 Tests swap in a `_FakePathProvider` pointing `path_provider` at a temp
 directory, so they never touch a real documents folder. Any new store behavior
@@ -298,3 +371,18 @@ means a human. `flutter run -d <simulator-id>` plus
 at it, which catches layout errors and crashes but not interaction. Anything
 about *behavior* — completion gestures, focus order, Health — needs hands on the
 device. Say so rather than implying it was verified.
+
+Two tricks reach screens and states a screenshot otherwise can't, without taps:
+
+- **To open a tab other than Home**, temporarily set `_HomeScreenState._index`
+  to that tab's position. Revert it before committing — check with `git diff`.
+- **To reach a data state, write the store directly.** The simulator's copy
+  lives at `$(xcrun simctl get_app_container <id> com.forma.workout
+  data)/Documents/forma_data.json`. Terminate the app first (a running one
+  holds `_cache` in memory and will overwrite the file), edit, then relaunch
+  with `xcrun simctl launch` — **not** `flutter run`, which reinstalls the app
+  and mints a fresh, empty container. Seeded records must carry *every*
+  non-nullable key their `fromJson` reads (`created_at` is the easy one to
+  forget); a partial record throws and the store quarantines the file and
+  reseeds, which looks exactly like the seeding silently not working. Clear the
+  test data out afterwards.

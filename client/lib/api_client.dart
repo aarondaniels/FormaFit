@@ -149,7 +149,9 @@ class ApiClient {
     if (await file.exists()) {
       try {
         final contents = await file.readAsString();
-        _cache = _AppData.fromJson(jsonDecode(contents) as Map<String, dynamic>);
+        _cache = _AppData.fromJson(
+          jsonDecode(contents) as Map<String, dynamic>,
+        );
       } catch (_) {
         // Never silently discard user data: set the unreadable file aside for
         // manual recovery, then start fresh.
@@ -312,10 +314,7 @@ class ApiClient {
   /// source. Where a single workout ends up with the target exercise twice its
   /// sets are combined into one entry; a template that ends up referencing it
   /// twice keeps the first reference.
-  Future<void> mergeExercise({
-    required int sourceId,
-    required int targetId,
-  }) {
+  Future<void> mergeExercise({required int sourceId, required int targetId}) {
     return _mutate(() async {
       final data = await _load();
       if (sourceId == targetId) return;
@@ -328,13 +327,9 @@ class ApiClient {
         if (!w.exercises.any((we) => we.exerciseId == sourceId)) continue;
         final repointed = [
           for (final we in w.exercises)
-            we.exerciseId == sourceId
-                ? we.copyWith(exerciseId: targetId)
-                : we,
+            we.exerciseId == sourceId ? we.copyWith(exerciseId: targetId) : we,
         ];
-        data.workouts[i] = w.copyWith(
-          exercises: _mergeSameExercise(repointed),
-        );
+        data.workouts[i] = w.copyWith(exercises: _mergeSameExercise(repointed));
       }
 
       for (var i = 0; i < data.templates.length; i++) {
@@ -342,9 +337,7 @@ class ApiClient {
         if (!t.exercises.any((te) => te.exerciseId == sourceId)) continue;
         final repointed = [
           for (final te in t.exercises)
-            te.exerciseId == sourceId
-                ? te.copyWith(exerciseId: targetId)
-                : te,
+            te.exerciseId == sourceId ? te.copyWith(exerciseId: targetId) : te,
         ];
         final seen = <int>{};
         final kept = [
@@ -537,6 +530,21 @@ class ApiClient {
     });
   }
 
+  /// Whether a workout left open and untouched raises a local notification.
+  ///
+  /// Off until the user turns it on, for the same reason as Health sync:
+  /// enabling it triggers the system permission prompt.
+  Future<bool> workoutRemindersEnabled() async =>
+      (await _load()).workoutRemindersEnabled;
+
+  Future<void> setWorkoutRemindersEnabled(bool enabled) {
+    return _mutate(() async {
+      final data = await _load();
+      data.workoutRemindersEnabled = enabled;
+      await _persist();
+    });
+  }
+
   /// Turns drafts into stored records, assigning ids and normalizing set
   /// numbering so gaps left by deleted sets don't reach the file.
   List<WorkoutExercise> _materialize(
@@ -646,10 +654,11 @@ class ApiClient {
 
   Future<List<Template>> listTemplates({int? folderId}) async {
     final data = await _load();
-    final filtered = data.templates
-        .where((t) => folderId == null || t.folderId == folderId)
-        .toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
+    final filtered =
+        data.templates
+            .where((t) => folderId == null || t.folderId == folderId)
+            .toList()
+          ..sort((a, b) => a.name.compareTo(b.name));
     return List.unmodifiable(filtered);
   }
 
@@ -1180,10 +1189,11 @@ class ApiClient {
   }
 
   /// Monday of the week containing [day].
-  static DateTime _weekStart(DateTime day) =>
-      DateTime(day.year, day.month, day.day).subtract(
-        Duration(days: day.weekday - DateTime.monday),
-      );
+  static DateTime _weekStart(DateTime day) => DateTime(
+    day.year,
+    day.month,
+    day.day,
+  ).subtract(Duration(days: day.weekday - DateTime.monday));
 
   /// Consecutive weeks with at least one workout, counting back from the
   /// current week. An empty current week doesn't break a streak that is still
@@ -1204,9 +1214,7 @@ class ApiClient {
 
   static List<TimePoint> _series(Map<DateTime, double> byDate) {
     final keys = byDate.keys.toList()..sort();
-    return List.unmodifiable([
-      for (final k in keys) TimePoint(k, byDate[k]!),
-    ]);
+    return List.unmodifiable([for (final k in keys) TimePoint(k, byDate[k]!)]);
   }
 
   // -------------------------------------------------------------------------
@@ -1251,12 +1259,14 @@ class ApiClient {
         'Workout Notes',
       ],
     ];
-    final workouts = [...data.workouts]..sort((a, b) => a.date.compareTo(b.date));
+    final workouts = [...data.workouts]
+      ..sort((a, b) => a.date.compareTo(b.date));
     for (final w in workouts) {
-      final date = w.date.toIso8601String().split('.').first.replaceFirst(
-        'T',
-        ' ',
-      );
+      final date = w.date
+          .toIso8601String()
+          .split('.')
+          .first
+          .replaceFirst('T', ' ');
       for (final we in w.exercises) {
         final name = byId[we.exerciseId]?.name ?? 'Unknown exercise';
         var order = 1;
@@ -1333,17 +1343,18 @@ class ApiClient {
         );
       }
       // A "Weight (kg)" header wins over the toggle; otherwise trust the caller.
-      final useKg = (iWeight != -1 && header[iWeight].contains('kg')) ||
-          weightsInKg;
+      final useKg =
+          (iWeight != -1 && header[iWeight].contains('kg')) || weightsInKg;
 
       // Index the library by normalized base signature so imported names map
       // onto existing exercises across the Strong/Forma naming difference.
       final index = <String, List<({int id, Set<String> equipment})>>{};
       for (final e in data.exercises) {
         final n = _normalizeExerciseName(e.name);
-        index
-            .putIfAbsent(n.base, () => [])
-            .add((id: e.id, equipment: n.equipment));
+        index.putIfAbsent(n.base, () => []).add((
+          id: e.id,
+          equipment: n.equipment,
+        ));
       }
 
       var exercisesCreated = 0;
@@ -1372,9 +1383,10 @@ class ApiClient {
         }
         final created = Exercise(id: data.nextExerciseId++, name: name);
         data.exercises.add(created);
-        index
-            .putIfAbsent(n.base, () => [])
-            .add((id: created.id, equipment: n.equipment));
+        index.putIfAbsent(n.base, () => []).add((
+          id: created.id,
+          equipment: n.equipment,
+        ));
         exercisesCreated++;
         return created.id;
       }
@@ -1665,6 +1677,7 @@ class _AppData {
     required this.templates,
     required this.measurements,
     this.healthSyncEnabled = false,
+    this.workoutRemindersEnabled = false,
   });
 
   /// A fresh store carrying the starter exercise library.
@@ -1722,6 +1735,10 @@ class _AppData {
       // Absent in files written before Health sync existed; defaulting to off
       // keeps an upgrade from silently opting anyone in.
       healthSyncEnabled: json['health_sync_enabled'] as bool? ?? false,
+      // Same story: off unless the file says otherwise, so an upgrade never
+      // starts asking for notification permission on its own.
+      workoutRemindersEnabled:
+          json['workout_reminders_enabled'] as bool? ?? false,
     );
   }
 
@@ -1745,6 +1762,9 @@ class _AppData {
   /// measurements back.
   bool healthSyncEnabled;
 
+  /// User preference: notify when the logger has been left open and untouched.
+  bool workoutRemindersEnabled;
+
   /// Version of the on-disk JSON layout. Bump on breaking changes and migrate
   /// older files in [_AppData.fromJson].
   static const schemaVersion = 1;
@@ -1766,5 +1786,6 @@ class _AppData {
     'templates': templates.map((e) => e.toJson()).toList(),
     'measurements': measurements.map((e) => e.toJson()).toList(),
     'health_sync_enabled': healthSyncEnabled,
+    'workout_reminders_enabled': workoutRemindersEnabled,
   };
 }
