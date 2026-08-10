@@ -47,7 +47,7 @@ is no network layer anywhere in the app. Don't add HTTP calls, auth, or caching
 layers on the assumption that a server exists — cross-device sync is
 deliberately out of scope, and export/import is the answer to "move my data".
 
-This one file is ~1,700 lines and holds both storage and every derived-value
+This one file is ~1,800 lines and holds both storage and every derived-value
 computation (stats, muscle recovery, personal records, 1RM progression, CSV
 import/export). Derived values are computed on read and never persisted, so
 they cannot drift from the underlying history — keep it that way rather than
@@ -285,6 +285,9 @@ workout is sitting there unsaved.
 - [lib/widgets/glass.dart](client/lib/widgets/glass.dart) holds the shared
   chrome (`GlassSection`, `StatTile`, `LargeTitle`, `EmptyState`,
   `AsyncFailure`). Reach for these before building a one-off card or error view.
+  The rest of [lib/widgets/](client/lib/widgets/) is the same idea: `charts.dart`
+  (`Sparkline`, `TimeSeriesChart`, `WeeklyBarChart`, `MuscleGroupDonut`),
+  `number_pad.dart` (numeric entry — see the logger section) and `rest.dart`.
 - The app uses `liquid_glass_widgets` for real GPU shader refraction, which
   requires `LiquidGlassWidgets.initialize()` and the `wrap()` call in
   [lib/main.dart](client/lib/main.dart). Navigation is a four-tab `GlassTabBar`
