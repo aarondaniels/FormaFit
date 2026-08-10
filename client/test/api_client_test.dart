@@ -857,6 +857,101 @@ void main() {
     });
   });
 
+  group('template defaults from a session', () {
+    List<WorkoutSetDraft> sets(List<(double?, int?)> pairs) => [
+      for (final p in pairs) WorkoutSetDraft(weight: p.$1, reps: p.$2),
+    ];
+
+    test('the working set wins over the heaviest single', () {
+      // 3×5 at 185 with a heavy single on top: the template should describe
+      // the work, not the peak.
+      final d = ApiClient.templateDefaultsFor(
+        sets([(185, 5), (185, 5), (185, 5), (225, 1)]),
+      );
+      expect(d.sets, 4);
+      expect(d.weight, 185);
+      expect(d.reps, 5);
+    });
+
+    test('a tie goes to the heavier load', () {
+      // Two sets at each: the one progressed to is the one worth carrying.
+      final d = ApiClient.templateDefaultsFor(
+        sets([(135, 8), (135, 8), (145, 8), (145, 8)]),
+      );
+      expect(d.weight, 145);
+      expect(d.reps, 8);
+    });
+
+    test('reps at the same weight are not conflated', () {
+      final d = ApiClient.templateDefaultsFor(
+        sets([(100, 10), (100, 8), (100, 8)]),
+      );
+      expect(d.weight, 100);
+      expect(d.reps, 8);
+    });
+
+    test('bodyweight sets still count, with no load to carry', () {
+      final d = ApiClient.templateDefaultsFor(sets([(null, 12), (null, 10)]));
+      expect(d.sets, 2);
+      expect(d.weight, isNull);
+      expect(d.reps, isNull);
+    });
+
+    test('an incomplete set counts toward the set total only', () {
+      final d = ApiClient.templateDefaultsFor(
+        sets([(95, 5), (95, 5), (null, null)]),
+      );
+      expect(d.sets, 3);
+      expect(d.weight, 95);
+      expect(d.reps, 5);
+    });
+
+    test('updating a template replaces its exercises', () async {
+      final api = ApiClient();
+      final folder = await api.createFolder(name: 'PPL');
+      final t = await api.createTemplate(
+        folderId: folder.id,
+        name: 'Push',
+        exercises: [
+          TemplateExercise(
+            exerciseId: 1,
+            order: 0,
+            defaultSets: 3,
+            defaultWeight: 135,
+            defaultReps: 8,
+          ),
+        ],
+      );
+
+      // What a session that added an exercise and moved the weight up would
+      // write back.
+      await api.updateTemplate(
+        id: t.id,
+        exercises: [
+          TemplateExercise(
+            exerciseId: 1,
+            order: 0,
+            defaultSets: 4,
+            defaultWeight: 145,
+            defaultReps: 8,
+            restSeconds: 120,
+          ),
+          TemplateExercise(exerciseId: 2, order: 1, defaultSets: 3),
+        ],
+      );
+
+      final after = (await ApiClient().getTemplate(t.id))!;
+      expect(after.exercises, hasLength(2));
+      expect(after.exercises[0].defaultWeight, 145);
+      expect(after.exercises[0].defaultSets, 4);
+      expect(after.exercises[0].restSeconds, 120);
+      expect(after.exercises[1].exerciseId, 2);
+      // The name and folder are untouched by an exercises-only update.
+      expect(after.name, 'Push');
+      expect(after.folderId, folder.id);
+    });
+  });
+
   group('volume comparison', () {
     List<SetLoad> loads(List<(double?, int?)> pairs) => [
       for (final p in pairs) (weight: p.$1, reps: p.$2),

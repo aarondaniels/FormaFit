@@ -16,6 +16,7 @@ import '../providers.dart';
 import '../theme/tokens.dart';
 import '../widgets/charts.dart';
 import '../widgets/glass.dart';
+import '../widgets/number_pad.dart';
 import 'exercise_detail_screen.dart' show trimNumber;
 
 /// Color for a change, given which direction counts as progress for the kind.
@@ -124,13 +125,13 @@ class MeasurementsScreen extends ConsumerWidget {
 
 /// One kind in the overview: where it stands, how far it has moved, when it was
 /// last taken, and the shape of its history.
-class _SummaryRow extends StatelessWidget {
+class _SummaryRow extends ConsumerWidget {
   const _SummaryRow({required this.summary});
 
   final MeasurementSummary summary;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final change = summary.changeOverall;
     final age = summary.daysSince(DateTime.now());
 
@@ -191,6 +192,16 @@ class _SummaryRow extends StatelessWidget {
               ],
             ),
             const SizedBox(width: AppSpacing.xs),
+            // Logging one kind without opening its history: the row itself
+            // still navigates, so both the frequent and the occasional act
+            // are one tap from here.
+            IconButton(
+              icon: const Icon(Icons.add, size: 20),
+              tooltip: 'Log ${summary.kind}',
+              visualDensity: VisualDensity.compact,
+              onPressed: () =>
+                  showMeasurementSession(context, ref, onlyKind: summary.kind),
+            ),
             const Icon(
               Icons.chevron_right,
               size: 18,
@@ -216,10 +227,7 @@ class MeasurementDetailScreen extends ConsumerWidget {
 
     return Scaffold(
       extendBodyBehindAppBar: true,
-      appBar: GlassAppBar(
-        leading: const GlassBackButton(),
-        title: Text(kind),
-      ),
+      appBar: GlassAppBar(leading: const GlassBackButton(), title: Text(kind)),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => showMeasurementSession(context, ref, onlyKind: kind),
         icon: const Icon(Icons.add),
@@ -347,7 +355,9 @@ class _HistoryRow extends ConsumerWidget {
         await mutateWith(ref, (api) => api.deleteMeasurement(removed.id));
         messenger.showSnackBar(
           SnackBar(
-            content: Text('Deleted ${trimNumber(removed.value)} ${removed.unit}'),
+            content: Text(
+              'Deleted ${trimNumber(removed.value)} ${removed.unit}',
+            ),
             action: SnackBarAction(
               label: 'Undo',
               // Restores the values, not the id — a measurement is its date and
@@ -431,23 +441,62 @@ class _SessionSheet extends ConsumerStatefulWidget {
 class _SessionSheetState extends ConsumerState<_SessionSheet> {
   late final List<String> _kinds = [...widget.initialKinds];
   final Map<String, TextEditingController> _controllers = {};
+  final Map<String, FocusNode> _focusNodes = {};
   DateTime _date = DateTime.now();
   bool _saving = false;
 
   TextEditingController _controllerFor(String kind) =>
       _controllers.putIfAbsent(kind, TextEditingController.new);
 
+  /// One node per kind, rebuilding the sheet as focus moves so the pad appears,
+  /// disappears and knows which field it is typing into.
+  FocusNode _focusFor(String kind) => _focusNodes.putIfAbsent(
+    kind,
+    () => FocusNode(debugLabel: kind)..addListener(_onFocusChange),
+  );
+
+  void _onFocusChange() {
+    if (mounted) setState(() {});
+  }
+
+  /// The kind currently being typed into, or null when the pad is dismissed.
+  String? get _activeKind {
+    for (final kind in _kinds) {
+      if (_focusNodes[kind]?.hasFocus ?? false) return kind;
+    }
+    return null;
+  }
+
   @override
   void dispose() {
     for (final c in _controllers.values) {
       c.dispose();
     }
+    for (final n in _focusNodes.values) {
+      n
+        ..removeListener(_onFocusChange)
+        ..dispose();
+    }
     super.dispose();
   }
 
+  /// Enter moves to the next kind; on the last it just dismisses the pad,
+  /// leaving Save an explicit act rather than something Enter can trigger by
+  /// surprise.
+  void _enterFrom(String kind) {
+    final next = _kinds.indexOf(kind) + 1;
+    if (next < _kinds.length) {
+      FocusScope.of(context).requestFocus(_focusFor(_kinds[next]));
+    } else {
+      FocusManager.instance.primaryFocus?.unfocus();
+    }
+  }
+
   /// Standard kinds not already on the sheet.
-  List<String> get _available =>
-      [for (final k in MeasurementKinds.all) if (!_kinds.contains(k)) k];
+  List<String> get _available => [
+    for (final k in MeasurementKinds.all)
+      if (!_kinds.contains(k)) k,
+  ];
 
   Future<void> _save() async {
     final entries = <MeasurementDraft>[];
@@ -457,9 +506,9 @@ class _SessionSheetState extends ConsumerState<_SessionSheet> {
       if (text.isEmpty) continue;
       final value = double.tryParse(text);
       if (value == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$kind needs a number.')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$kind needs a number.')));
         return;
       }
       entries.add(MeasurementDraft(kind: kind, value: value));
@@ -509,70 +558,106 @@ class _SessionSheetState extends ConsumerState<_SessionSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(
-        left: AppSpacing.md,
-        right: AppSpacing.md,
-        top: AppSpacing.md,
-        bottom: MediaQuery.of(context).viewInsets.bottom + AppSpacing.md,
+    final active = _activeKind;
+
+    // Horizontal padding lives on the individual sections rather than the
+    // sheet, so the number pad can run edge to edge the way a keyboard does.
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.9,
       ),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.8,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Log measurements', style: AppTypography.h4),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.calendar_today, size: 20),
-              title: Text(DateFormat.yMMMEd().format(_date)),
-              trailing: TextButton(
-                onPressed: () async {
-                  final picked = await showDatePicker(
-                    context: context,
-                    initialDate: _date,
-                    firstDate: DateTime(2000),
-                    lastDate: DateTime.now(),
-                  );
-                  if (picked != null) setState(() => _date = picked);
-                },
-                child: const Text('Change'),
-              ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.md,
+              AppSpacing.md,
+              AppSpacing.md,
+              0,
             ),
-            const Divider(height: 1),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final kind in _kinds)
-                    _SessionRow(
-                      kind: kind,
-                      controller: _controllerFor(kind),
-                      previous: widget.previous[kind],
-                      autofocus: kind == _kinds.first,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Log measurements', style: AppTypography.h4),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.calendar_today, size: 20),
+                  title: Text(DateFormat.yMMMEd().format(_date)),
+                  trailing: TextButton(
+                    onPressed: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: _date,
+                        firstDate: DateTime(2000),
+                        lastDate: DateTime.now(),
+                      );
+                      if (picked != null) setState(() => _date = picked);
+                    },
+                    child: const Text('Change'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              children: [
+                for (final kind in _kinds)
+                  _SessionRow(
+                    kind: kind,
+                    controller: _controllerFor(kind),
+                    focusNode: _focusFor(kind),
+                    previous: widget.previous[kind],
+                    // Opening straight onto the first field means the pad is
+                    // already up: a single-value session is type-and-save.
+                    autofocus: kind == _kinds.first,
+                  ),
+                if (_available.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: _addKind,
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('Add measurement'),
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
-            if (_available.isNotEmpty)
-              TextButton.icon(
-                onPressed: _addKind,
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('Add measurement'),
-              ),
-            const SizedBox(height: AppSpacing.sm),
-            SizedBox(
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.md,
+              AppSpacing.sm,
+              AppSpacing.md,
+              AppSpacing.sm,
+            ),
+            child: SizedBox(
               width: double.infinity,
               child: FilledButton(
                 onPressed: _saving ? null : _save,
                 child: Text(_saving ? 'Saving…' : 'Save'),
               ),
             ),
-          ],
-        ),
+          ),
+          if (active != null)
+            NumberPad(
+              // Every measurement is a decimal quantity — pounds, inches,
+              // percent — so unlike reps the point is always available.
+              decimalEnabled: true,
+              isLastField: active == _kinds.last,
+              onKey: (k) => typeIntoField(_controllerFor(active), true, k),
+              onBackspace: () => backspaceInField(_controllerFor(active)),
+              onEnter: () => _enterFrom(active),
+              onCollapse: () => FocusManager.instance.primaryFocus?.unfocus(),
+            )
+          else
+            SafeArea(top: false, child: const SizedBox(height: AppSpacing.xs)),
+        ],
       ),
     );
   }
@@ -587,12 +672,14 @@ class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.kind,
     required this.controller,
+    required this.focusNode,
     required this.previous,
     required this.autofocus,
   });
 
   final String kind;
   final TextEditingController controller;
+  final FocusNode focusNode;
   final MeasurementSummary? previous;
   final bool autofocus;
 
@@ -640,11 +727,15 @@ class _SessionRow extends StatelessWidget {
             width: 108,
             child: TextField(
               controller: controller,
+              focusNode: focusNode,
               autofocus: autofocus,
+              // Driven by the in-app NumberPad: read-only keeps iOS's own pad
+              // away — it has no return key, so moving between six kinds would
+              // otherwise mean tapping into every field by hand.
+              readOnly: true,
+              showCursor: true,
               textAlign: TextAlign.end,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
+              onTap: () => FocusScope.of(context).requestFocus(focusNode),
               decoration: InputDecoration(
                 hintText: previous == null
                     ? null

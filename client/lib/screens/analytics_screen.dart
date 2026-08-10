@@ -10,7 +10,7 @@ import '../widgets/glass.dart';
 import 'dashboard_screen.dart' show compactNumber;
 import 'exercise_detail_screen.dart' show trimNumber;
 import 'measurements_screen.dart'
-    show MeasurementsScreen, changeColor, formatChange;
+    show MeasurementsScreen, changeColor, formatChange, showMeasurementSession;
 
 class AnalyticsScreen extends ConsumerWidget {
   const AnalyticsScreen({super.key});
@@ -50,33 +50,33 @@ class AnalyticsScreen extends ConsumerWidget {
             if (hasWorkouts) ...[
               _Totals(stats: s),
               const SizedBox(height: AppSpacing.lg),
-            GlassSection(
-              title: 'Volume per week',
-              child: SizedBox(
-                height: 200,
-                child: WeeklyBarChart(
-                  points: s.volumeByWeek,
-                  color: AppColors.primary,
+              GlassSection(
+                title: 'Volume per week',
+                child: SizedBox(
+                  height: 200,
+                  child: WeeklyBarChart(
+                    points: s.volumeByWeek,
+                    color: AppColors.primary,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            GlassSection(
-              title: 'Workouts per week',
-              child: SizedBox(
-                height: 180,
-                child: WeeklyBarChart(
-                  points: s.frequencyByWeek,
-                  color: AppColors.success,
+              const SizedBox(height: AppSpacing.lg),
+              GlassSection(
+                title: 'Workouts per week',
+                child: SizedBox(
+                  height: 180,
+                  child: WeeklyBarChart(
+                    points: s.frequencyByWeek,
+                    color: AppColors.success,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            GlassSection(
-              title: 'Muscle group balance',
-              child: MuscleGroupDonut(volumeByGroup: s.volumeByMuscleGroup),
-            ),
-            const SizedBox(height: AppSpacing.lg),
+              const SizedBox(height: AppSpacing.lg),
+              GlassSection(
+                title: 'Muscle group balance',
+                child: MuscleGroupDonut(volumeByGroup: s.volumeByMuscleGroup),
+              ),
+              const SizedBox(height: AppSpacing.lg),
               _PersonalRecords(records: s.personalRecords),
             ],
           ],
@@ -98,15 +98,25 @@ class _BodyCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final summaries = ref.watch(measurementSummariesProvider);
 
-    void open() => Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const MeasurementsScreen()),
-    );
+    void open() => Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const MeasurementsScreen()));
 
     return GlassSection(
       title: 'Body',
-      trailing: TextButton(
-        onPressed: open,
-        child: const Text('All measurements'),
+      // Logging is the frequent act and browsing the rare one, so the card
+      // carries both: the sheet opens from here rather than two screens in.
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextButton(onPressed: open, child: const Text('All')),
+          IconButton.filled(
+            icon: const Icon(Icons.add, size: 20),
+            tooltip: 'Log measurements',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => showMeasurementSession(context, ref),
+          ),
+        ],
       ),
       child: summaries.maybeWhen(
         data: (list) => list.isEmpty
@@ -131,29 +141,42 @@ class _BodyCard extends ConsumerWidget {
             : Column(
                 children: [
                   // The three most recently measured kinds — the card is a
-                  // signpost, not the full list.
+                  // signpost, not the full list. Each row logs that one kind,
+                  // which is the whole session for a weigh-in.
                   for (final s in _mostRecent(list, 3))
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(s.kind, style: AppTypography.h6),
-                          ),
-                          Text(
-                            '${trimNumber(s.latest)} ${s.unit}',
-                            style: AppTypography.numeric,
-                          ),
-                          if (s.changeOverall != null) ...[
-                            const SizedBox(width: AppSpacing.sm),
-                            Text(
-                              formatChange(s.changeOverall!, s.unit),
-                              style: AppTypography.small.copyWith(
-                                color: changeColor(s.kind, s.changeOverall!),
-                              ),
+                    InkWell(
+                      onTap: () => showMeasurementSession(
+                        context,
+                        ref,
+                        onlyKind: s.kind,
+                      ),
+                      borderRadius: BorderRadius.circular(
+                        AppSpacing.radiusSmall,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: AppSpacing.sm,
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(s.kind, style: AppTypography.h6),
                             ),
+                            Text(
+                              '${trimNumber(s.latest)} ${s.unit}',
+                              style: AppTypography.numeric,
+                            ),
+                            if (s.changeOverall != null) ...[
+                              const SizedBox(width: AppSpacing.sm),
+                              Text(
+                                formatChange(s.changeOverall!, s.unit),
+                                style: AppTypography.small.copyWith(
+                                  color: changeColor(s.kind, s.changeOverall!),
+                                ),
+                              ),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
                     ),
                 ],

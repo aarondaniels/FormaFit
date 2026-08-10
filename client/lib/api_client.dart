@@ -923,6 +923,42 @@ class ApiClient {
     return List.unmodifiable(smoothed);
   }
 
+  /// The defaults a template should carry after a session was performed
+  /// against it: how many sets, and the load to pre-fill next time.
+  ///
+  /// The load is the **most repeated** (weight, reps) pair rather than the
+  /// heaviest or the last. A template exists to describe the working sets —
+  /// "3×5 at 185" — and both alternatives get that wrong in the ordinary case:
+  /// the heaviest set is a single top rep, and the last is whatever was left
+  /// after fatigue. Ties go to the heavier pair, so a session split evenly
+  /// between two loads records the one that was progressed to.
+  ///
+  /// Sets missing a weight or reps are ignored for the load but still counted,
+  /// since a bodyweight movement has sets worth carrying over.
+  static ({int sets, double? weight, int? reps}) templateDefaultsFor(
+    List<WorkoutSetDraft> sets,
+  ) {
+    final counts = <(double, int), int>{};
+    for (final s in sets) {
+      final w = s.weight;
+      final r = s.reps;
+      if (w == null || r == null) continue;
+      final key = (w, r);
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    if (counts.isEmpty) {
+      return (sets: sets.length, weight: null, reps: null);
+    }
+    var best = counts.entries.first;
+    for (final e in counts.entries) {
+      if (e.value > best.value ||
+          (e.value == best.value && e.key.$1 > best.key.$1)) {
+        best = e;
+      }
+    }
+    return (sets: sets.length, weight: best.key.$1, reps: best.key.$2);
+  }
+
   // -------------------------------------------------------------------------
   // Derived values
   // -------------------------------------------------------------------------

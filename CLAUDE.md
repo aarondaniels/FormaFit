@@ -10,7 +10,7 @@ All work happens in `client/` — the repo root holds only the README and this f
 cd client
 flutter pub get
 flutter analyze                  # must be clean; it is today
-flutter test                     # 77 tests, all in test/api_client_test.dart
+flutter test                     # 83 tests, all in test/api_client_test.dart
 flutter run                      # iOS simulator is the verified target
 ```
 
@@ -162,9 +162,18 @@ Things in here that were deliberate and are worth not undoing:
   (`ReorderableDragStartListener`), never a long-press: the set fields are
   read-only with their own tap handler and would fight it. A `proxyDecorator`
   substitutes a compact pill, since a real card is far too tall to drag.
-- **Set fields are read-only on purpose**, driven by the in-app `_NumberPad`
+- **Set fields are read-only on purpose**, driven by the in-app `NumberPad`
   instead of the system keyboard — iOS's number pad has no return key, and Enter
-  advancing to the next field is the whole point.
+  advancing to the next field is the whole point. The pad now lives in
+  [lib/widgets/number_pad.dart](client/lib/widgets/number_pad.dart) with the
+  field-editing helpers (`typeIntoField`, `backspaceInField`), shared with the
+  measurement session sheet. Any new column of numeric fields should use it
+  rather than the system keypad.
+- **A session started from a template offers to update it on save.**
+  `_offerTemplateUpdate` asks only when something actually differs, and only
+  after the workout is already stored, so declining costs nothing. Supersets
+  are the one change that can't be carried back — `TemplateExercise` has no
+  group id.
 - **Portrait is locked for this screen only**, in `initState`, and released in
   `dispose` (the Info.plist still declares landscape support app-wide).
 - **Completion is never inferred from the fields.** Typing a rep count means you
@@ -333,7 +342,18 @@ workout is sitting there unsaved.
 - **Measurements are entered as a batch**, not one value at a time — the sheet
   covers every tracked kind and saves through `createMeasurements` as a single
   queued write. `measurementSummaries()` drives the overview and only reports
-  kinds that actually have entries.
+  kinds that actually have entries. `showMeasurementSession(onlyKind:)` narrows
+  it to one, which is what the per-kind shortcuts use.
+- **Logging is offered wherever a measurement is shown.** A weigh-in is a
+  weekly habit and used to be four taps and two screens deep: the Progress
+  tab's Body card carries a "+" and each of its rows logs that one kind, as do
+  the rows on the Measurements screen. The batch sheet is still the full act;
+  these are the shortcuts to it.
+- **`ApiClient.templateDefaultsFor` picks a template's load from a session** —
+  the most *repeated* (weight, reps) pair, ties going to the heavier. Not the
+  heaviest set (that's a top single) and not the last (that's fatigue). A
+  template describes working sets, and "3×5 at 185" is what should come back
+  next time. Tested.
 - **`MeasurementKinds.goalFor` decides change colors.** Waist and body fat count
   down, chest and limbs count up, and body weight is deliberately *neutral* —
   the app has both cutters and bulkers, and coloring a gain red would
@@ -349,7 +369,7 @@ workout is sitting there unsaved.
 ## Testing
 
 Only the store and pure computation are covered —
-[test/api_client_test.dart](client/test/api_client_test.dart), 77 tests across
+[test/api_client_test.dart](client/test/api_client_test.dart), 83 tests across
 seeding, workouts, stats, recovery, templates, measurements, persistence,
 export/import, CSV, volume comparison, stored Health metrics, preferences and
 workout age. **There are no widget tests at all**, so every screen change rests

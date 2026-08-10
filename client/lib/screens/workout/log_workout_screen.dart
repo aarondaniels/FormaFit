@@ -13,6 +13,7 @@ import '../../models.dart';
 import '../../providers.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/glass.dart';
+import '../../widgets/number_pad.dart';
 import '../../widgets/rest.dart';
 import '../../workout_reminder.dart';
 import '../exercise_detail_screen.dart' show trimNumber;
@@ -482,25 +483,6 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   }
 
   /// Inserts [key] at the caret, keeping weights to a single decimal point.
-  void _typeInto(TextEditingController ctrl, bool decimal, String key) {
-    final text = ctrl.text;
-    final sel = ctrl.selection;
-    var start = sel.start;
-    var end = sel.end;
-    if (start < 0 || end < 0) {
-      start = text.length;
-      end = text.length;
-    }
-    final candidate = text.replaceRange(start, end, key);
-    if (key == '.' && (!decimal || '.'.allMatches(candidate).length > 1)) {
-      return;
-    }
-    ctrl.value = TextEditingValue(
-      text: candidate,
-      selection: TextSelection.collapsed(offset: start + key.length),
-    );
-  }
-
   // --- Rest timer ---------------------------------------------------------
 
   void _startRest(int seconds) {
@@ -612,29 +594,6 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   }
 
   /// Deletes the selection, or the character before the caret.
-  void _backspaceIn(TextEditingController ctrl) {
-    final text = ctrl.text;
-    final sel = ctrl.selection;
-    var start = sel.start;
-    var end = sel.end;
-    if (start < 0 || end < 0) {
-      start = text.length;
-      end = text.length;
-    }
-    if (start == end) {
-      if (start == 0) return;
-      ctrl.value = TextEditingValue(
-        text: text.replaceRange(start - 1, start, ''),
-        selection: TextSelection.collapsed(offset: start - 1),
-      );
-    } else {
-      ctrl.value = TextEditingValue(
-        text: text.replaceRange(start, end, ''),
-        selection: TextSelection.collapsed(offset: start),
-      );
-    }
-  }
-
   /// Collapses the number pad by dropping focus from the active set field; the
   /// pad is only shown while such a field is focused. A rest countdown in
   /// progress keeps running.
@@ -793,6 +752,13 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       // measured. Only on a fresh save — an edit would write a second,
       // duplicate workout for the same window.
       if (existing == null) await _syncToHealth(saved);
+      // Offer to fold the session back into its template before the
+      // celebration — it is a question about the work just done, and asking it
+      // after the summary sheet would read as an afterthought.
+      final template = widget.fromTemplate;
+      if (existing == null && template != null && mounted) {
+        await _offerTemplateUpdate(template, drafts);
+      }
       // Celebrate a freshly completed workout with its highlights; editing an
       // existing one just returns to the detail without the fanfare.
       if (existing == null && mounted) {
@@ -811,6 +777,116 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Could not save: $e')));
+      }
+    }
+  }
+
+  /// What the originating template would look like if it recorded this
+  /// session: same exercises in the order they were performed, each carrying
+  /// the sets done and the load to pre-fill next time.
+  ///
+  /// Supersets are not represented — `TemplateExercise` has no group — so
+  /// pairing exercises during a session is the one change that cannot be
+  /// carried back.
+  List<TemplateExercise> _templateFromSession(
+    List<WorkoutExerciseDraft> drafts,
+  ) {
+    final exercises = <TemplateExercise>[];
+    for (var i = 0; i < drafts.length; i++) {
+      final d = drafts[i];
+      final defaults = ApiClient.templateDefaultsFor(d.sets);
+      exercises.add(
+        TemplateExercise(
+          exerciseId: d.exerciseId,
+          order: i,
+          defaultSets: defaults.sets,
+          defaultWeight: defaults.weight,
+          defaultReps: defaults.reps,
+          restSeconds: d.restSeconds,
+        ),
+      );
+    }
+    return exercises;
+  }
+
+  /// Whether [next] would actually change [template], so an unchanged session
+  /// never asks.
+  bool _templateWouldChange(Template template, List<TemplateExercise> next) {
+    final current = template.exercises;
+    if (current.length != next.length) return true;
+    for (var i = 0; i < next.length; i++) {
+      final a = current[i];
+      final b = next[i];
+      if (a.exerciseId != b.exerciseId ||
+          a.defaultSets != b.defaultSets ||
+          a.defaultWeight != b.defaultWeight ||
+          a.defaultReps != b.defaultReps ||
+          a.restSeconds != b.restSeconds) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Offers to fold what was just performed back into the template it came
+  /// from — the point being that a template drifts out of date the moment you
+  /// add a set or move the weight up, and correcting it by hand afterwards is
+  /// a chore nobody does.
+  ///
+  /// Opt-in, and only when something actually differs: the session is already
+  /// saved by this point, so declining costs nothing and the workout is never
+  /// at risk.
+  Future<void> _offerTemplateUpdate(
+    Template template,
+    List<WorkoutExerciseDraft> drafts,
+  ) async {
+    final next = _templateFromSession(drafts);
+    if (!_templateWouldChange(template, next)) return;
+    if (!mounted) return;
+
+    final update = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Update “${template.name}”?'),
+        content: const Text(
+          'This session differs from the template it started from. Updating '
+          'stores what you just did as the new starting point — the exercises '
+          'in this order, the sets you performed, and the weight and reps you '
+          'worked at.\n\n'
+          'Workouts you already logged are not affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep as is'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Update template'),
+          ),
+        ],
+      ),
+    );
+    if (update != true || !mounted) return;
+
+    try {
+      await mutateWith(
+        ref,
+        (api) => api.updateTemplate(id: template.id, exercises: next),
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('“${template.name}” updated.')));
+      }
+    } catch (e) {
+      // The template can be deleted or renamed while a session is running, in
+      // which case updateTemplate throws. The workout is already saved, so say
+      // so and move on rather than failing the save after the fact.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not update the template: $e')),
+        );
       }
     }
   }
@@ -1325,15 +1401,15 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
                   onSkip: _skipRest,
                 ),
               if (activeTarget != null)
-                _NumberPad(
+                NumberPad(
                   decimalEnabled: activeTarget.isWeight,
                   isLastField: isLastField,
-                  onKey: (k) => _typeInto(
+                  onKey: (k) => typeIntoField(
                     activeTarget.controller,
                     activeTarget.isWeight,
                     k,
                   ),
-                  onBackspace: () => _backspaceIn(activeTarget.controller),
+                  onBackspace: () => backspaceInField(activeTarget.controller),
                   onEnter: () => _enterFromField(activeField!),
                   onCollapse: _collapseKeypad,
                 ),
@@ -1974,7 +2050,7 @@ class _SetRow extends StatelessWidget {
 /// history stay aligned, and tapping it copies that value into the field.
 ///
 /// The field is read-only so the system keyboard never appears — editing is
-/// driven entirely by the in-app [_NumberPad], which the screen shows whenever
+/// driven entirely by the in-app [NumberPad], which the screen shows whenever
 /// one of these holds focus.
 class _FieldWithReference extends StatelessWidget {
   const _FieldWithReference({
@@ -2134,206 +2210,6 @@ class _RestControl extends StatelessWidget {
 /// The app's own numeric keypad, shown in place of the system keyboard while a
 /// set field is focused. Its Enter key advances to the next field — the whole
 /// point of a custom pad, since iOS's number pad has no return key.
-class _NumberPad extends StatelessWidget {
-  const _NumberPad({
-    required this.onKey,
-    required this.onBackspace,
-    required this.onEnter,
-    required this.onCollapse,
-    required this.decimalEnabled,
-    required this.isLastField,
-  });
-
-  final void Function(String) onKey;
-  final VoidCallback onBackspace;
-  final VoidCallback onEnter;
-
-  /// Dismisses the pad by dropping focus from the active field. Lets the user
-  /// reach content the pad would otherwise cover without leaving the screen.
-  final VoidCallback onCollapse;
-
-  /// Reps are whole numbers, so the decimal key is disabled for them.
-  final bool decimalEnabled;
-
-  /// The Enter key reads "Done" on the workout's final field, since there is
-  /// nothing after it to advance to.
-  final bool isLastField;
-
-  @override
-  Widget build(BuildContext context) {
-    // Keep the pad out of the focus tree so tapping keys never pulls focus off
-    // the active field. Stretch so the tall Enter key fills the pad height.
-    return Focus(
-      canRequestFocus: false,
-      descendantsAreFocusable: false,
-      child: Material(
-        color: AppColors.darkBlue,
-        child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.all(AppSpacing.sm),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _CollapseBar(onTap: onCollapse),
-                SizedBox(
-                  height: 240,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Expanded(
-                        flex: 3,
-                        child: Column(
-                          children: [
-                            _row(['1', '2', '3']),
-                            _row(['4', '5', '6']),
-                            _row(['7', '8', '9']),
-                            Expanded(
-                              child: Row(
-                                children: [
-                                  _key(
-                                    label: '.',
-                                    onTap: decimalEnabled
-                                        ? () => onKey('.')
-                                        : null,
-                                  ),
-                                  _key(label: '0', onTap: () => onKey('0')),
-                                  _key(
-                                    onTap: onBackspace,
-                                    child: const Icon(Icons.backspace_outlined),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: _button(
-                          onTap: onEnter,
-                          background: AppColors.primary,
-                          foreground: AppColors.onPrimary,
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const Icon(Icons.keyboard_return),
-                              const SizedBox(height: AppSpacing.xs),
-                              Text(
-                                isLastField ? 'Done' : 'Next',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// One row of the digit grid; each key shares the width equally.
-  Widget _row(List<String> labels) => Expanded(
-    child: Row(
-      children: [for (final l in labels) _key(label: l, onTap: () => onKey(l))],
-    ),
-  );
-
-  /// A key sized to share its row's width equally.
-  Widget _key({String? label, Widget? child, VoidCallback? onTap}) => Expanded(
-    child: _button(label: label, child: child, onTap: onTap),
-  );
-
-  /// The visual key itself, filling whatever box it is given.
-  Widget _button({
-    String? label,
-    Widget? child,
-    VoidCallback? onTap,
-    Color? background,
-    Color? foreground,
-  }) {
-    final fg = onTap == null
-        ? AppColors.mutedOnDark
-        : (foreground ?? AppColors.onDark);
-    return Padding(
-      padding: const EdgeInsets.all(3),
-      child: Material(
-        color: background ?? AppColors.cta,
-        borderRadius: BorderRadius.circular(AppSpacing.radiusSmall),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(AppSpacing.radiusSmall),
-          onTap: onTap,
-          child: Center(
-            child: IconTheme(
-              data: IconThemeData(color: fg),
-              child:
-                  child ??
-                  Text(
-                    label ?? '',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w500,
-                      color: fg,
-                    ),
-                  ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The dismiss affordance across the top of the number pad: a centered grab
-/// handle with a chevron, the whole bar tappable to collapse the pad.
-class _CollapseBar extends StatelessWidget {
-  const _CollapseBar({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(AppSpacing.radiusSmall),
-      child: SizedBox(
-        height: 32,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                color: AppColors.cta,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const Align(
-              alignment: Alignment.centerRight,
-              child: Padding(
-                padding: EdgeInsets.only(right: AppSpacing.sm),
-                child: Icon(
-                  Icons.keyboard_arrow_down,
-                  size: 22,
-                  color: AppColors.mutedOnDark,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 /// One exercise being composed, holding its own set rows.
 class _ExerciseEntry {
   _ExerciseEntry({
