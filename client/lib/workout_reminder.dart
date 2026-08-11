@@ -29,6 +29,14 @@ class WorkoutReminder {
   /// How long the logger may sit untouched before the reminder fires.
   static const idleAfter = Duration(minutes: 30);
 
+  /// How long a *paused* workout may sit before the reminder fires.
+  ///
+  /// Longer than [idleAfter] because pausing says the break is deliberate: the
+  /// user has told us they are stepping away, so nagging them on the untouched
+  /// timetable would be nagging them for doing the right thing. An hour is
+  /// still short enough to catch the pause nobody came back from.
+  static const pausedAfter = Duration(hours: 1);
+
   /// True where reminders are implemented at all.
   static bool get isSupported => Platform.isIOS;
 
@@ -55,13 +63,32 @@ class WorkoutReminder {
   /// still throttles it rather than hitting the channel on every tap.
   Future<void> scheduleIdleReminder() async {
     if (!isSupported) return;
-    await _invoke<bool>('schedule', {
-      'seconds': idleAfter.inSeconds.toDouble(),
-      'title': 'Workout still in progress',
-      'body':
-          'Forma has had a workout open for ${idleAfter.inMinutes} minutes '
+    await _schedule(
+      idleAfter,
+      'Workout still in progress',
+      'Forma has had a workout open for ${idleAfter.inMinutes} minutes '
           'without a change. Open it to finish and save, or discard it.',
-    });
+    );
+  }
+
+  /// Arms (or re-arms) the reminder for [pausedAfter] from now, for a workout
+  /// the user has paused.
+  ///
+  /// Scheduled once, when the workout is paused, and *not* pushed out by
+  /// touching the screen the way [scheduleIdleReminder] is: a paused workout is
+  /// waiting on the user coming back to it, and reading back through the sets
+  /// while paused is not coming back to it.
+  ///
+  /// It replaces the same pending request, so a workout is never waiting on two
+  /// alerts at once.
+  Future<void> schedulePausedReminder() async {
+    if (!isSupported) return;
+    await _schedule(
+      pausedAfter,
+      'Workout paused',
+      'Forma has had a workout paused for an hour. Open it to pick up where '
+          'you left off, finish and save, or discard it.',
+    );
   }
 
   /// Drops the pending reminder, and any already delivered.
@@ -71,6 +98,16 @@ class WorkoutReminder {
   Future<void> cancel() async {
     if (!isSupported) return;
     await _invoke<bool>('cancel');
+  }
+
+  /// Hands one pending request to the system, replacing whichever is already
+  /// waiting — idle and paused share the id, so they can never both fire.
+  Future<void> _schedule(Duration after, String title, String body) async {
+    await _invoke<bool>('schedule', {
+      'seconds': after.inSeconds.toDouble(),
+      'title': title,
+      'body': body,
+    });
   }
 
   /// Every call fails soft: a reminder is a convenience, and no failure here

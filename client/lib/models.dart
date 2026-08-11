@@ -83,6 +83,16 @@ class Exercise {
   /// the starter library without duplicating their own entries.
   final bool isDefault;
 
+  /// True when the movement carries no external load — push-ups, crunches, a
+  /// plank. There is no weight to ask for, so the logger drops the field and
+  /// every derived figure measures this exercise in **reps** instead of pounds.
+  ///
+  /// Deliberately *not* the same thing as the "Bodyweight" equipment type,
+  /// which also covers pull-ups and dips: those take a belt, and hiding the
+  /// weight field would make a loaded set impossible to record. Equipment says
+  /// what you hold; this says whether a load is meaningful at all.
+  final bool isBodyweight;
+
   Exercise({
     required this.id,
     required this.name,
@@ -91,6 +101,7 @@ class Exercise {
     this.equipmentTypeId,
     this.instructions,
     this.isDefault = false,
+    this.isBodyweight = false,
   });
 
   factory Exercise.fromJson(Map<String, dynamic> j) => Exercise(
@@ -101,6 +112,9 @@ class Exercise {
     equipmentTypeId: j['equipment_type_id'] as int?,
     instructions: j['instructions'] as String?,
     isDefault: j['is_default'] as bool? ?? false,
+    // Defaulted rather than required: a store written before this field
+    // existed simply has no key here, which is why it needs no schema bump.
+    isBodyweight: j['is_bodyweight'] as bool? ?? false,
   );
 
   Map<String, dynamic> toJson() => {
@@ -111,6 +125,7 @@ class Exercise {
     'equipment_type_id': equipmentTypeId,
     'instructions': instructions,
     'is_default': isDefault,
+    'is_bodyweight': isBodyweight,
   };
 
   Exercise copyWith({
@@ -121,6 +136,7 @@ class Exercise {
     int? equipmentTypeId,
     String? instructions,
     bool? isDefault,
+    bool? isBodyweight,
   }) => Exercise(
     id: id ?? this.id,
     name: name ?? this.name,
@@ -129,6 +145,7 @@ class Exercise {
     equipmentTypeId: equipmentTypeId ?? this.equipmentTypeId,
     instructions: instructions ?? this.instructions,
     isDefault: isDefault ?? this.isDefault,
+    isBodyweight: isBodyweight ?? this.isBodyweight,
   );
 }
 
@@ -232,7 +249,14 @@ class WorkoutExercise {
     restSeconds: restSeconds ?? this.restSeconds,
   );
 
+  /// Tonnage for this exercise. Always pounds: a bodyweight movement has no
+  /// load and so contributes nothing here — its work is counted by [totalReps]
+  /// instead, and the two are never added together.
   double get volume => sets.fold(0.0, (sum, s) => sum + s.volume);
+
+  /// Reps performed across every set — the unit of work for a bodyweight
+  /// exercise, where tonnage would always be zero.
+  int get totalReps => sets.fold(0, (sum, s) => sum + (s.reps ?? 0));
 
   /// Heaviest weight moved for any set that also recorded reps.
   double? get topWeight {
@@ -668,13 +692,54 @@ class MuscleRecovery {
 }
 
 /// One exercise's best-ever performance, used for the PR list.
+/// One workout's work, split by unit: tonnage for the loaded exercises, reps
+/// for the ones marked bodyweight.
+///
+/// The same split `stats()` makes, exposed for the screens that show a single
+/// session — without it a workout of nothing but push-ups reads as "0 lb",
+/// which is the one thing this feature exists to stop.
+({double tonnage, int bodyweightReps}) workoutWork(
+  Workout workout,
+  Map<int, Exercise> byId,
+) {
+  var tonnage = 0.0;
+  var reps = 0;
+  for (final we in workout.exercises) {
+    if (byId[we.exerciseId]?.isBodyweight ?? false) {
+      reps += we.totalReps;
+    } else {
+      tonnage += we.volume;
+    }
+  }
+  return (tonnage: tonnage, bodyweightReps: reps);
+}
+
+/// The best set logged for one exercise.
+///
+/// Two shapes, because two kinds of exercise: a loaded movement records the
+/// heaviest weight it was worked with, and a bodyweight movement — where every
+/// set weighs the same — records the most reps in a single set. [isBodyweight]
+/// says which one this is, and the fields that don't apply are null.
 class PersonalRecord {
   final int exerciseId;
   final String exerciseName;
-  final double heaviestWeight;
+
+  /// Heaviest single set. Null for a bodyweight exercise, which has no load to
+  /// rank sets by.
+  final double? heaviestWeight;
+
   final int? repsAtHeaviest;
   final DateTime achievedOn;
+
+  /// Biggest single set by tonnage. 0 for a bodyweight exercise — see
+  /// [bestReps], which is that exercise's equivalent.
   final double bestSetVolume;
+
+  /// True when this record is measured in reps rather than pounds.
+  final bool isBodyweight;
+
+  /// Most reps in a single set. Only set for a bodyweight exercise.
+  final int? bestReps;
 
   PersonalRecord({
     required this.exerciseId,
@@ -683,6 +748,8 @@ class PersonalRecord {
     required this.repsAtHeaviest,
     required this.achievedOn,
     required this.bestSetVolume,
+    this.isBodyweight = false,
+    this.bestReps,
   });
 }
 
@@ -730,13 +797,21 @@ class VolumeComparison {
 
   static bool _isLogged(SetLoad set) => set.weight != null || set.reps != null;
 
+  /// [bodyweight] settles the unit outright, for an exercise marked as carrying
+  /// no load. Without it the unit is inferred from the sets, which is still
+  /// needed for an unmarked exercise someone simply logs without weights.
   factory VolumeComparison.of({
     required List<SetLoad> current,
     required List<SetLoad> previous,
+    bool bodyweight = false,
   }) {
     // One loaded set on either side makes this a weighted exercise; a session
-    // that is merely blank so far shouldn't flip the unit mid-workout.
-    final repsOnly = ![...current, ...previous].any((s) => (s.weight ?? 0) > 0);
+    // that is merely blank so far shouldn't flip the unit mid-workout. A
+    // bodyweight exercise is reps-only regardless — a stray weight left in the
+    // history from before it was marked must not drag it back onto tonnage.
+    final repsOnly =
+        bodyweight ||
+        ![...current, ...previous].any((s) => (s.weight ?? 0) > 0);
 
     double sum(Iterable<SetLoad> sets) =>
         sets.fold(0.0, (total, s) => total + _valueOf(s, repsOnly: repsOnly));
@@ -814,7 +889,16 @@ class MeasurementSummary {
 class WorkoutStats {
   final int totalWorkouts;
   final int totalSets;
+
+  /// Tonnage across every loaded set, in pounds.
   final double totalVolume;
+
+  /// Reps across every set of a bodyweight exercise.
+  ///
+  /// Kept apart from [totalVolume] rather than folded into it: pounds and reps
+  /// are different units, and a single number claiming to be both would be
+  /// worse than two honest ones.
+  final int totalBodyweightReps;
 
   /// Seconds spent training across all workouts with a recorded duration.
   final int totalDuration;
@@ -831,8 +915,14 @@ class WorkoutStats {
   /// Workout count per calendar week, oldest first.
   final List<TimePoint> frequencyByWeek;
 
-  /// Share of total volume per muscle group.
-  final Map<String, double> volumeByMuscleGroup;
+  /// Sets worked per muscle group — what the balance donut divides up.
+  ///
+  /// Counted in sets rather than tonnage because tonnage cannot describe a
+  /// bodyweight movement: a chest day of push-ups would weigh nothing and
+  /// vanish from the chart entirely. Sets are the one unit both kinds of
+  /// exercise share, and sets-per-muscle-group is how training balance is
+  /// normally read anyway.
+  final Map<String, double> setsByMuscleGroup;
 
   final List<PersonalRecord> personalRecords;
 
@@ -840,6 +930,7 @@ class WorkoutStats {
     required this.totalWorkouts,
     required this.totalSets,
     required this.totalVolume,
+    required this.totalBodyweightReps,
     required this.totalDuration,
     required this.workoutsThisWeek,
     required this.workoutsThisMonth,
@@ -847,7 +938,7 @@ class WorkoutStats {
     required this.averageEffort,
     required this.volumeByWeek,
     required this.frequencyByWeek,
-    required this.volumeByMuscleGroup,
+    required this.setsByMuscleGroup,
     required this.personalRecords,
   });
 
@@ -855,6 +946,7 @@ class WorkoutStats {
     totalWorkouts: 0,
     totalSets: 0,
     totalVolume: 0,
+    totalBodyweightReps: 0,
     totalDuration: 0,
     workoutsThisWeek: 0,
     workoutsThisMonth: 0,
@@ -862,7 +954,7 @@ class WorkoutStats {
     averageEffort: 0,
     volumeByWeek: const [],
     frequencyByWeek: const [],
-    volumeByMuscleGroup: const {},
+    setsByMuscleGroup: const {},
     personalRecords: const [],
   );
 }

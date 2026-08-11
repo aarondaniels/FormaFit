@@ -29,6 +29,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
   late final TextEditingController _instructions;
   String? _muscleGroup;
   int? _equipmentTypeId;
+  bool _isBodyweight = false;
   bool _saving = false;
 
   @override
@@ -40,6 +41,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
     _instructions = TextEditingController(text: e?.instructions ?? '');
     _muscleGroup = e?.muscleGroup;
     _equipmentTypeId = e?.equipmentTypeId;
+    _isBodyweight = e?.isBodyweight ?? false;
   }
 
   @override
@@ -63,6 +65,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
             description: _emptyToNull(_description.text),
             equipmentTypeId: _equipmentTypeId,
             instructions: _emptyToNull(_instructions.text),
+            isBodyweight: _isBodyweight,
           );
         }
         return api.updateExercise(
@@ -74,6 +77,7 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
             equipmentTypeId: _equipmentTypeId,
             instructions: _emptyToNull(_instructions.text),
             isDefault: existing.isDefault,
+            isBodyweight: _isBodyweight,
           ),
         );
       });
@@ -136,6 +140,24 @@ class _ExerciseFormScreenState extends ConsumerState<ExerciseFormScreen> {
                   DropdownMenuItem(value: t.id, child: Text(t.name)),
               ],
               onChanged: (v) => setState(() => _equipmentTypeId = v),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            // Sits under Equipment because that is what it is most often
+            // confused with: "Bodyweight" equipment covers pull-ups and dips,
+            // which take a belt. This asks the different question of whether a
+            // load means anything at all for this movement.
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _isBodyweight,
+              onChanged: (v) => setState(() => _isBodyweight = v),
+              title: const Text('Bodyweight only'),
+              subtitle: Text(
+                'No weight to log. Sets record reps alone, and this exercise '
+                'is measured in reps rather than pounds.',
+                style: AppTypography.small.copyWith(
+                  color: AppColors.mutedOnDark,
+                ),
+              ),
             ),
             const SizedBox(height: AppSpacing.md),
             TextFormField(

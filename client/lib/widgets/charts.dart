@@ -77,7 +77,9 @@ class TimeSeriesChart extends StatelessWidget {
     final maxY = values.reduce((a, b) => a > b ? a : b);
     // Pad the band so the line never rides the top or bottom edge; a flat
     // series still needs a non-zero range or the chart collapses.
-    final pad = (maxY - minY) == 0 ? (maxY.abs() * 0.1 + 1) : (maxY - minY) * 0.15;
+    final pad = (maxY - minY) == 0
+        ? (maxY.abs() * 0.1 + 1)
+        : (maxY - minY) * 0.15;
 
     return LineChart(
       LineChartData(
@@ -156,17 +158,12 @@ class TimeSeriesChart extends StatelessWidget {
             isCurved: true,
             curveSmoothness: 0.2,
             preventCurveOverShooting: true,
-            color: smoothed == null
-                ? color
-                : color.withValues(alpha: 0.28),
+            color: smoothed == null ? color : color.withValues(alpha: 0.28),
             barWidth: smoothed == null ? 2.5 : 1.5,
             dotData: FlDotData(
               show: smoothed == null && spots.length <= 12,
-              getDotPainter: (_, _, _, _) => FlDotCirclePainter(
-                radius: 3,
-                color: color,
-                strokeWidth: 0,
-              ),
+              getDotPainter: (_, _, _, _) =>
+                  FlDotCirclePainter(radius: 3, color: color, strokeWidth: 0),
             ),
             belowBarData: BarAreaData(
               show: filled && smoothed == null,
@@ -230,7 +227,9 @@ class Sparkline extends StatelessWidget {
     final maxY = values.reduce((a, b) => a > b ? a : b);
     // A flat series still needs a non-zero band or the line collapses onto an
     // edge; otherwise leave a little air above and below.
-    final pad = (maxY - minY) == 0 ? (maxY.abs() * 0.1 + 1) : (maxY - minY) * 0.2;
+    final pad = (maxY - minY) == 0
+        ? (maxY.abs() * 0.1 + 1)
+        : (maxY - minY) * 0.2;
 
     return LineChart(
       LineChartData(
@@ -319,8 +318,7 @@ class WeeklyBarChart extends StatelessWidget {
             sideTitles: SideTitles(
               showTitles: true,
               reservedSize: 44,
-              getTitlesWidget: (value, meta) =>
-                  value == meta.max || value == 0
+              getTitlesWidget: (value, meta) => value == meta.max || value == 0
                   ? const SizedBox.shrink()
                   : Text(
                       compactAxisNumber(value),
@@ -385,20 +383,24 @@ class WeeklyBarChart extends StatelessWidget {
   }
 }
 
-/// Share-of-total breakdown, used for volume per muscle group.
+/// Share-of-total breakdown of training across muscle groups.
+///
+/// Fed in sets rather than tonnage, so a bodyweight movement counts for what it
+/// is instead of weighing nothing. Only shares are ever rendered, so the unit
+/// never reaches the screen.
 class MuscleGroupDonut extends StatelessWidget {
-  const MuscleGroupDonut({super.key, required this.volumeByGroup});
+  const MuscleGroupDonut({super.key, required this.setsByGroup});
 
-  final Map<String, double> volumeByGroup;
+  final Map<String, double> setsByGroup;
 
   @override
   Widget build(BuildContext context) {
-    final entries = volumeByGroup.entries.where((e) => e.value > 0).toList()
+    final entries = setsByGroup.entries.where((e) => e.value > 0).toList()
       ..sort((a, b) => b.value.compareTo(a.value));
     if (entries.isEmpty) {
       return Center(
         child: Text(
-          'No volume logged yet',
+          'No sets logged yet',
           style: AppTypography.small.copyWith(color: AppColors.mutedOnDark),
         ),
       );

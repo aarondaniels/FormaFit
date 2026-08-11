@@ -134,9 +134,7 @@ class _EditorState extends ConsumerState<TemplateEditorScreen> {
       extendBodyBehindAppBar: true,
       appBar: GlassAppBar(
         leading: const GlassBackButton(icon: Icons.close),
-        title: Text(
-          widget.existing == null ? 'New template' : 'Edit template',
-        ),
+        title: Text(widget.existing == null ? 'New template' : 'Edit template'),
         actions: [
           GlassIconButton(
             icon: const Icon(Icons.check),
@@ -158,11 +156,7 @@ class _EditorState extends ConsumerState<TemplateEditorScreen> {
               padding: const EdgeInsets.all(AppSpacing.lg),
               child: Column(
                 children: [
-                  const Icon(
-                    Icons.list_alt,
-                    size: 40,
-                    color: AppColors.cta,
-                  ),
+                  const Icon(Icons.list_alt, size: 40, color: AppColors.cta),
                   const SizedBox(height: AppSpacing.md),
                   Text('No exercises yet', style: AppTypography.h5),
                   const SizedBox(height: AppSpacing.sm),
@@ -195,6 +189,8 @@ class _EditorState extends ConsumerState<TemplateEditorScreen> {
                   index: i,
                   row: _rows[i],
                   name: exercises[_rows[i].exerciseId]?.name ?? 'Exercise',
+                  bodyweight:
+                      exercises[_rows[i].exerciseId]?.isBodyweight ?? false,
                   onRemove: () => setState(() => _rows.removeAt(i).dispose()),
                   onChanged: () => setState(() {}),
                 ),
@@ -222,6 +218,7 @@ class _ExerciseRowCard extends StatelessWidget {
     required this.index,
     required this.row,
     required this.name,
+    required this.bodyweight,
     required this.onRemove,
     required this.onChanged,
   });
@@ -229,6 +226,11 @@ class _ExerciseRowCard extends StatelessWidget {
   final int index;
   final _Row row;
   final String name;
+
+  /// Drops the default-weight field: there is no load to pre-fill, and a
+  /// template row asking for one would carry it into the logger, which has no
+  /// weight field to put it in.
+  final bool bodyweight;
   final VoidCallback onRemove;
   final VoidCallback onChanged;
 
@@ -276,15 +278,17 @@ class _ExerciseRowCard extends StatelessWidget {
                   onChanged: onChanged,
                 ),
               ),
-              const SizedBox(width: AppSpacing.sm),
-              Expanded(
-                child: _NumberField(
-                  label: 'Weight',
-                  controller: row.weightController,
-                  decimal: true,
-                  onChanged: onChanged,
+              if (!bodyweight) ...[
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: _NumberField(
+                    label: 'Weight',
+                    controller: row.weightController,
+                    decimal: true,
+                    onChanged: onChanged,
+                  ),
                 ),
-              ),
+              ],
               const SizedBox(width: AppSpacing.sm),
               Expanded(
                 child: _NumberField(

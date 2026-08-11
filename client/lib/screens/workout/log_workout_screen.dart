@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show ImageFilter;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -72,6 +73,17 @@ List<T> moveSupersetBlock<T>(
 /// with a test asserting it resolves.
 const restChimeAsset = 'lib/assets/sounds/rest_complete.wav';
 
+/// The set field the number pad is currently driving, with everything the pad
+/// and the completion gesture need about it.
+typedef _FieldTarget = ({
+  TextEditingController controller,
+  bool isWeight,
+  int exerciseId,
+  int setIndex,
+  int restSeconds,
+  _SetEntry set,
+});
+
 /// Composes a workout in memory and writes it in one shot on save.
 ///
 /// Nothing is persisted until the user saves, so an abandoned session leaves
@@ -109,6 +121,20 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   Stopwatch? _stopwatch;
   Timer? _ticker;
   int? _fixedDuration;
+
+  /// When the session was paused, or null while it is running.
+  ///
+  /// A `Stopwatch` already excludes stopped time from `elapsed`, so the saved
+  /// duration counts the work and not the break — nothing here has to subtract
+  /// anything. This is the paused *flag* as much as the timestamp; the
+  /// timestamp is what the paused card shows.
+  ///
+  /// Pausing lives entirely in memory, like the rest of the draft: leaving the
+  /// logger discards the session whether it was paused or not.
+  DateTime? _pausedAt;
+
+  /// Rest left on the clock when the workout was paused, re-anchored on resume.
+  int? _pausedRestRemaining;
 
   /// Rest countdown, shared across the workout (one rest runs at a time).
   ///
@@ -214,13 +240,24 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     // in which case scheduling would be accepted and never delivered.
     if (!enabled || !await _reminder.hasPermission() || !mounted) return;
     _remindersOn = true;
-    _noteActivity();
+    // This resolves a frame or two after the logger opens, so the workout may
+    // already be paused by the time it does.
+    if (_isPaused) {
+      unawaited(_reminder.schedulePausedReminder());
+    } else {
+      _noteActivity();
+    }
   }
 
   /// Pushes the idle reminder out another window. Called from a [Listener] over
   /// the whole screen, so any touch counts as the workout still being tended.
+  ///
+  /// A paused workout is on the longer [WorkoutReminder.pausedAfter] window
+  /// instead, armed once at the pause, so touches must not push it out — the
+  /// alert is for a session that was stepped away from and never resumed, and
+  /// the resume is the only thing that answers it.
   void _noteActivity() {
-    if (!_remindersOn) return;
+    if (!_remindersOn || _isPaused) return;
     final now = DateTime.now();
     final armed = _reminderArmedAt;
     // Every tap would cross the platform channel dozens of times a set. A
@@ -309,19 +346,101 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
 
   int? get _duration => _stopwatch?.elapsed.inSeconds ?? _fixedDuration;
 
+  /// Whether the session clock is stopped. Only a live session can be paused —
+  /// editing a saved workout has no running clock to stop.
+  bool get _isPaused => _pausedAt != null;
+
+  // --- Pause --------------------------------------------------------------
+
+  /// Stops the session clock, and everything that runs off it.
+  ///
+  /// A pause is the user saying they are stepping away — a phone call, a
+  /// queue for the rack — so the break must not land in the workout's duration,
+  /// the rest chime must not go off in their pocket, and the reminder moves to
+  /// the hour-long paused window. The logger's own state is untouched: the sets
+  /// are all still there, exactly as typed, waiting for the resume.
+  void _pauseSession() {
+    if (_stopwatch == null || _isPaused) return;
+    _stopwatch!.stop();
+    // Nothing ticks while paused: no clock is moving, so a per-second rebuild
+    // would only redraw the same frame.
+    _ticker?.cancel();
+    _ticker = null;
+    _pauseRest();
+    // A set field left focused would sit under the paused scrim with the number
+    // pad still up, typing into a workout that is not running.
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() => _pausedAt = DateTime.now());
+    if (_remindersOn) unawaited(_reminder.schedulePausedReminder());
+  }
+
+  /// Restarts the session clock and picks the workout back up where it stopped.
+  void _resumeSession() {
+    if (_stopwatch == null || !_isPaused) return;
+    _stopwatch!.start();
+    _ticker ??= Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => setState(() {}),
+    );
+    setState(() => _pausedAt = null);
+    _resumeRest();
+    // Back on the untouched-for-half-an-hour window. Clearing the throttle
+    // makes this reschedule land rather than being swallowed as a repeat of the
+    // touch that hit Resume.
+    _reminderArmedAt = null;
+    _noteActivity();
+  }
+
+  /// Freezes the rest countdown, keeping what was left on it.
+  ///
+  /// The countdown is anchored to a wall-clock end time, which is exactly what
+  /// a pause has to break: left alone it would run down inside someone's pocket
+  /// and chime at them mid-phone-call.
+  void _pauseRest() {
+    if (_restEndTime == null) return;
+    _restTicker?.cancel();
+    _restTicker = null;
+    _pausedRestRemaining = _restRemaining;
+    _restEndTime = null;
+  }
+
+  /// Re-anchors the frozen rest to the clock and starts it running again.
+  void _resumeRest() {
+    final remaining = _pausedRestRemaining;
+    _pausedRestRemaining = null;
+    if (remaining == null || remaining <= 0) return;
+    _restEndTime = DateTime.now().add(Duration(seconds: remaining));
+    _restTicker = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _tickRest(),
+    );
+  }
+
+  /// Whether this exercise carries no load, so its rows are reps only.
+  ///
+  /// Read rather than watched: this is called from callbacks as well as build,
+  /// and [build] watches the same provider so the rows still rebuild once the
+  /// library has loaded.
+  bool _isBodyweight(int exerciseId) =>
+      ref.read(exercisesByIdProvider).value?[exerciseId]?.isBodyweight ?? false;
+
   /// Every set field in the order focus should walk through them: down the sets
   /// of a plain exercise, but interleaved across the members of a superset
   /// (A1, B1, A2, B2, …), matching how a superset is actually performed.
+  ///
+  /// A bodyweight exercise contributes reps alone — it has no weight field on
+  /// screen, and a focus order naming one would strand Next on a node that
+  /// isn't in the tree.
   List<FocusNode> _focusOrder() {
     final order = <FocusNode>[];
     var i = 0;
     while (i < _entries.length) {
       final group = _entries[i].supersetGroup;
       if (group == null) {
+        final bodyweight = _isBodyweight(_entries[i].exerciseId);
         for (final s in _entries[i].sets) {
-          order
-            ..add(s.weightFocus)
-            ..add(s.repsFocus);
+          if (!bodyweight) order.add(s.weightFocus);
+          order.add(s.repsFocus);
         }
         i++;
         continue;
@@ -339,9 +458,8 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       for (var s = 0; s < maxSets; s++) {
         for (final e in block) {
           if (s < e.sets.length) {
-            order
-              ..add(e.sets[s].weightFocus)
-              ..add(e.sets[s].repsFocus);
+            if (!_isBodyweight(e.exerciseId)) order.add(e.sets[s].weightFocus);
+            order.add(e.sets[s].repsFocus);
           }
         }
       }
@@ -392,15 +510,7 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   /// field (decimals allowed) rather than reps, and which exercise/set it is
   /// (so its historical value can be looked up). Null when no set field has
   /// focus.
-  ({
-    TextEditingController controller,
-    bool isWeight,
-    int exerciseId,
-    int setIndex,
-    int restSeconds,
-    _SetEntry set,
-  })?
-  _activeFieldTarget(FocusNode? node) {
+  _FieldTarget? _activeFieldTarget(FocusNode? node) {
     if (node == null) return null;
     for (final e in _entries) {
       for (var i = 0; i < e.sets.length; i++) {
@@ -458,7 +568,8 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       }
     }
 
-    if (!target.isWeight && target.set.isFull) {
+    if (!target.isWeight &&
+        target.set.isFull(bodyweight: _isBodyweight(target.exerciseId))) {
       _completeSet(target.set, target.restSeconds);
       return;
     }
@@ -948,10 +1059,12 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
       final all = await ref.read(workoutsProvider.future);
       final byId = await ref.read(exercisesByIdProvider.future);
       final stats = await ref.read(statsProvider.future);
+      final work = workoutWork(saved, byId);
       return WorkoutSummary(
         exerciseCount: saved.exerciseCount,
         setCount: saved.setCount,
-        volume: saved.volume,
+        volume: work.tonnage,
+        bodyweightReps: work.bodyweightReps,
         durationLabel: saved.formattedDuration,
         totalWorkouts: stats.totalWorkouts,
         workoutsThisWeek: stats.workoutsThisWeek,
@@ -1012,19 +1125,32 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   /// best — by heaviest weight or by estimated one-rep max, so both "lifted
   /// heavier" and "same weight for more reps" count. Only exercises with prior
   /// history qualify, so a first-ever session isn't reported as a wall of PRs.
+  ///
+  /// A bodyweight exercise is judged on reps instead, matching how its record
+  /// is kept everywhere else: there is no weight to beat, and leaving it out
+  /// would mean a session of push-ups could never be a personal best.
   static List<PrHighlight> _sessionPRs(
     Workout saved,
     List<Workout> all,
     Map<int, Exercise> byId,
   ) {
+    bool isBodyweight(int id) => byId[id]?.isBodyweight ?? false;
+
     final priorWeight = <int, double>{};
     final priorOrm = <int, double>{};
+    final priorReps = <int, int>{};
     for (final w in all) {
       if (w.id == saved.id) continue;
       for (final we in w.exercises) {
         for (final s in we.sets) {
           final wt = s.weight;
           final r = s.reps;
+          if (isBodyweight(we.exerciseId)) {
+            if (r != null && r > (priorReps[we.exerciseId] ?? 0)) {
+              priorReps[we.exerciseId] = r;
+            }
+            continue;
+          }
           if (wt == null || r == null || wt <= 0) continue;
           if (wt > (priorWeight[we.exerciseId] ?? 0)) {
             priorWeight[we.exerciseId] = wt;
@@ -1042,10 +1168,17 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
     final bestWeight = <int, double>{};
     final bestReps = <int, int>{};
     final bestOrm = <int, double>{};
+    final bestBodyweightReps = <int, int>{};
     for (final we in saved.exercises) {
       for (final s in we.sets) {
         final wt = s.weight;
         final r = s.reps;
+        if (isBodyweight(we.exerciseId)) {
+          if (r != null && r > (bestBodyweightReps[we.exerciseId] ?? 0)) {
+            bestBodyweightReps[we.exerciseId] = r;
+          }
+          continue;
+        }
         if (wt == null || r == null || wt <= 0) continue;
         if (wt > (bestWeight[we.exerciseId] ?? 0)) {
           bestWeight[we.exerciseId] = wt;
@@ -1069,6 +1202,17 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
             exerciseName: byId[id]?.name ?? 'Exercise',
             weight: bestWeight[id]!,
             reps: bestReps[id]!,
+          ),
+        );
+      }
+    }
+    for (final id in bestBodyweightReps.keys) {
+      if (!priorReps.containsKey(id)) continue; // no prior history to beat
+      if (bestBodyweightReps[id]! > priorReps[id]!) {
+        prs.add(
+          PrHighlight(
+            exerciseName: byId[id]?.name ?? 'Exercise',
+            reps: bestBodyweightReps[id]!,
           ),
         );
       }
@@ -1194,6 +1338,10 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   Widget build(BuildContext context) {
     final isEdit = widget.existing != null;
     final elapsed = _stopwatch?.elapsed;
+    // Watched, not used directly: _isBodyweight reads this provider, and the
+    // focus order below depends on it, so the screen has to rebuild once the
+    // library resolves.
+    ref.watch(exercisesByIdProvider);
 
     // Show the keyboard toolbar only while one of the numeric set fields holds
     // focus — not for the notes field, which has its own return key.
@@ -1241,182 +1389,229 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
             leading: const GlassBackButton(icon: Icons.close),
             title: Text(isEdit ? 'Edit workout' : 'Log workout'),
             actions: [
-              if (elapsed != null)
+              if (elapsed != null) ...[
                 Center(
                   child: Padding(
-                    padding: const EdgeInsets.only(right: AppSpacing.sm),
+                    padding: const EdgeInsets.only(right: AppSpacing.xs),
                     child: Text(
                       _formatElapsed(elapsed),
                       style: AppTypography.numeric.copyWith(
-                        color: AppColors.primary,
+                        // Dimmed while paused, so a clock that has stopped
+                        // moving reads as deliberate rather than stuck.
+                        color: _isPaused
+                            ? AppColors.mutedOnDark
+                            : AppColors.primary,
                       ),
                     ),
                   ),
                 ),
+                // The pause control stays in the bar rather than under the
+                // scrim: it is the one thing that has to be reachable from both
+                // states, and the bar floats above the paused overlay.
+                GlassIconButton(
+                  icon: Icon(_isPaused ? Icons.play_arrow : Icons.pause),
+                  onPressed: _isPaused ? _resumeSession : _pauseSession,
+                ),
+              ],
               GlassIconButton(
                 icon: const Icon(Icons.check),
                 onPressed: _saving ? null : _save,
               ),
             ],
           ),
-          body: Column(
+          body: Stack(
+            // Tight constraints, so the logger is laid out exactly as it was
+            // when it was the body itself rather than a Stack child.
+            fit: StackFit.expand,
             children: [
-              Expanded(
-                // Slivers rather than a ListView: the exercise cards need to be
-                // a SliverReorderableList while the surrounding content stays
-                // ordinary boxes in the same scroll view.
-                child: CustomScrollView(
-                  slivers: [
-                    SliverPadding(
-                      padding: EdgeInsets.fromLTRB(
-                        AppSpacing.md,
-                        glassTopInset(context) + AppSpacing.sm,
-                        AppSpacing.md,
-                        0,
-                      ),
-                      sliver: SliverToBoxAdapter(
-                        child: _entries.isEmpty
-                            ? GlassCard(
-                                padding: const EdgeInsets.all(AppSpacing.lg),
-                                child: Column(
-                                  children: [
-                                    const Icon(
-                                      Icons.fitness_center,
-                                      size: 40,
-                                      color: AppColors.cta,
-                                    ),
-                                    const SizedBox(height: AppSpacing.md),
-                                    Text(
-                                      'No exercises yet',
-                                      style: AppTypography.h5,
-                                    ),
-                                    const SizedBox(height: AppSpacing.sm),
-                                    Text(
-                                      'Add exercises directly, or start from a '
-                                      'template.',
-                                      textAlign: TextAlign.center,
-                                      style: AppTypography.small.copyWith(
-                                        color: AppColors.mutedOnDark,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              )
-                            : const SizedBox.shrink(),
-                      ),
-                    ),
-                    SliverPadding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: AppSpacing.md,
-                      ),
-                      sliver: SliverReorderableList(
-                        itemCount: blocks.length,
-                        onReorder: _onReorderBlocks,
-                        onReorderStart: _onReorderStart,
-                        proxyDecorator: _dragProxy,
-                        itemBuilder: (context, blockIndex) {
-                          final block = blocks[blockIndex];
-                          final start = blockStarts[blockIndex];
-                          return Column(
-                            // Keyed on the block's first entry, which is a stable
-                            // object across rebuilds; positions are not.
-                            key: ObjectKey(block.first),
-                            children: [
-                              for (var j = 0; j < block.length; j++)
-                                Padding(
-                                  padding: const EdgeInsets.only(
-                                    bottom: AppSpacing.md,
-                                  ),
-                                  child: _exerciseCardAt(
-                                    start + j,
-                                    dragIndex: blockIndex,
-                                  ),
-                                ),
-                            ],
-                          );
-                        },
-                      ),
-                    ),
-                    SliverPadding(
-                      padding: EdgeInsets.fromLTRB(
-                        AppSpacing.md,
-                        0,
-                        AppSpacing.md,
-                        glassBottomInset(context),
-                      ),
-                      sliver: SliverToBoxAdapter(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            const SizedBox(height: AppSpacing.md),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    onPressed: _addExercises,
-                                    icon: const Icon(Icons.add),
-                                    label: const Text('Add exercise'),
-                                  ),
-                                ),
-                                const SizedBox(width: AppSpacing.sm),
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    onPressed: _applyTemplate,
-                                    icon: const Icon(
-                                      Icons.description_outlined,
-                                    ),
-                                    label: const Text('Template'),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: AppSpacing.lg),
-                            _sessionDetails(),
-                            const SizedBox(height: AppSpacing.lg),
-                            TextField(
-                              controller: _notes,
-                              maxLines: 3,
-                              decoration: const InputDecoration(
-                                labelText: 'Workout notes',
-                              ),
-                            ),
-                            const SizedBox(height: AppSpacing.lg),
-                            FilledButton(
-                              onPressed: _saving ? null : _save,
-                              child: Text(_saving ? 'Saving…' : 'Save workout'),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
+              // Paused, the session is inert: nothing here may be typed into or
+              // reordered until it is resumed, which is also what keeps a set
+              // from starting a rest countdown on a stopped clock. The app bar
+              // is a sibling of this in the Scaffold and paints above it, so
+              // close, save and resume all stay live.
+              AbsorbPointer(
+                absorbing: _isPaused,
+                child: _sessionBody(
+                  activeField: activeField,
+                  activeTarget: activeTarget,
+                  isLastField: isLastField,
+                  blocks: blocks,
+                  blockStarts: blockStarts,
                 ),
               ),
-              if (_restRemaining > 0)
-                _RestBar(
-                  remaining: _restRemaining,
-                  total: _restTotal,
-                  onAdd: () => _adjustRest(15),
-                  onSubtract: () => _adjustRest(-15),
-                  onSkip: _skipRest,
-                ),
-              if (activeTarget != null)
-                NumberPad(
-                  decimalEnabled: activeTarget.isWeight,
-                  isLastField: isLastField,
-                  onKey: (k) => typeIntoField(
-                    activeTarget.controller,
-                    activeTarget.isWeight,
-                    k,
-                  ),
-                  onBackspace: () => backspaceInField(activeTarget.controller),
-                  onEnter: () => _enterFromField(activeField!),
-                  onCollapse: _collapseKeypad,
+              if (_isPaused)
+                _PausedOverlay(
+                  elapsed: elapsed ?? Duration.zero,
+                  pausedAt: _pausedAt!,
+                  onResume: _resumeSession,
+                  remindersOn: _remindersOn,
                 ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// The logger proper — exercises, session details, rest bar and number pad.
+  ///
+  /// Split out of [build] only so the paused overlay can sit beside it in a
+  /// [Stack] without another level of indentation through the whole tree.
+  Widget _sessionBody({
+    required FocusNode? activeField,
+    required _FieldTarget? activeTarget,
+    required bool isLastField,
+    required List<List<_ExerciseEntry>> blocks,
+    required List<int> blockStarts,
+  }) {
+    return Column(
+      children: [
+        Expanded(
+          // Slivers rather than a ListView: the exercise cards need to be
+          // a SliverReorderableList while the surrounding content stays
+          // ordinary boxes in the same scroll view.
+          child: CustomScrollView(
+            slivers: [
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(
+                  AppSpacing.md,
+                  glassTopInset(context) + AppSpacing.sm,
+                  AppSpacing.md,
+                  0,
+                ),
+                sliver: SliverToBoxAdapter(
+                  child: _entries.isEmpty
+                      ? GlassCard(
+                          padding: const EdgeInsets.all(AppSpacing.lg),
+                          child: Column(
+                            children: [
+                              const Icon(
+                                Icons.fitness_center,
+                                size: 40,
+                                color: AppColors.cta,
+                              ),
+                              const SizedBox(height: AppSpacing.md),
+                              Text('No exercises yet', style: AppTypography.h5),
+                              const SizedBox(height: AppSpacing.sm),
+                              Text(
+                                'Add exercises directly, or start from a '
+                                'template.',
+                                textAlign: TextAlign.center,
+                                style: AppTypography.small.copyWith(
+                                  color: AppColors.mutedOnDark,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+                sliver: SliverReorderableList(
+                  itemCount: blocks.length,
+                  onReorder: _onReorderBlocks,
+                  onReorderStart: _onReorderStart,
+                  proxyDecorator: _dragProxy,
+                  itemBuilder: (context, blockIndex) {
+                    final block = blocks[blockIndex];
+                    final start = blockStarts[blockIndex];
+                    return Column(
+                      // Keyed on the block's first entry, which is a stable
+                      // object across rebuilds; positions are not.
+                      key: ObjectKey(block.first),
+                      children: [
+                        for (var j = 0; j < block.length; j++)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              bottom: AppSpacing.md,
+                            ),
+                            child: _exerciseCardAt(
+                              start + j,
+                              dragIndex: blockIndex,
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(
+                  AppSpacing.md,
+                  0,
+                  AppSpacing.md,
+                  glassBottomInset(context),
+                ),
+                sliver: SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: AppSpacing.md),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: _addExercises,
+                              icon: const Icon(Icons.add),
+                              label: const Text('Add exercise'),
+                            ),
+                          ),
+                          const SizedBox(width: AppSpacing.sm),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: _applyTemplate,
+                              icon: const Icon(Icons.description_outlined),
+                              label: const Text('Template'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: AppSpacing.lg),
+                      _sessionDetails(),
+                      const SizedBox(height: AppSpacing.lg),
+                      TextField(
+                        controller: _notes,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: 'Workout notes',
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.lg),
+                      FilledButton(
+                        onPressed: _saving ? null : _save,
+                        child: Text(_saving ? 'Saving…' : 'Save workout'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_restRemaining > 0)
+          _RestBar(
+            remaining: _restRemaining,
+            total: _restTotal,
+            onAdd: () => _adjustRest(15),
+            onSubtract: () => _adjustRest(-15),
+            onSkip: _skipRest,
+          ),
+        if (activeTarget != null)
+          NumberPad(
+            decimalEnabled: activeTarget.isWeight,
+            isLastField: isLastField,
+            onKey: (k) => typeIntoField(
+              activeTarget.controller,
+              activeTarget.isWeight,
+              k,
+            ),
+            onBackspace: () => backspaceInField(activeTarget.controller),
+            onEnter: () => _enterFromField(activeField!),
+            onCollapse: _collapseKeypad,
+          ),
+      ],
     );
   }
 
@@ -1483,6 +1678,107 @@ class _LogWorkoutScreenState extends ConsumerState<LogWorkoutScreen>
   }
 }
 
+/// What a paused session shows over the logger: the stopped clock, what pausing
+/// did, and the one way out.
+///
+/// It covers the logging surface but not the app bar — the Scaffold paints that
+/// above the body — so close and save stay reachable, and the bar's own
+/// play button is a second Resume for a thumb already up there.
+class _PausedOverlay extends StatelessWidget {
+  const _PausedOverlay({
+    required this.elapsed,
+    required this.pausedAt,
+    required this.onResume,
+    required this.remindersOn,
+  });
+
+  /// Time on the session clock, frozen at the pause.
+  final Duration elapsed;
+
+  /// When the pause started — the one moving part of a paused session, and the
+  /// answer to "how long have I been standing here".
+  final DateTime pausedAt;
+
+  final VoidCallback onResume;
+
+  /// Whether the user has the unfinished-workout reminder switched on, which
+  /// decides whether to promise one here.
+  final bool remindersOn;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      // Blurring the sets behind the scrim says "this is still here, it is just
+      // not running" more plainly than hiding them would. Nothing animates
+      // while paused, so the blur is painted once.
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: ColoredBox(
+          color: AppColors.dark.withValues(alpha: 0.7),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.xl),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.pause_circle_outline,
+                    size: 56,
+                    color: AppColors.primary,
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  Text('Workout paused', style: AppTypography.h3),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    'Since ${DateFormat.jm().format(pausedAt)}',
+                    style: AppTypography.small.copyWith(
+                      color: AppColors.mutedOnDark,
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    _LogWorkoutScreenState._formatElapsed(elapsed),
+                    style: AppTypography.numeric.copyWith(
+                      fontSize: 36,
+                      color: AppColors.mutedOnDark,
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  Text(
+                    'The clock is stopped and the break will not count toward '
+                    'this workout. Every set is exactly as you left it.',
+                    textAlign: TextAlign.center,
+                    style: AppTypography.caption.copyWith(
+                      color: AppColors.mutedOnDark,
+                    ),
+                  ),
+                  if (remindersOn) ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    Text(
+                      'Forma will remind you in an hour if the workout is '
+                      'still paused.',
+                      textAlign: TextAlign.center,
+                      style: AppTypography.small.copyWith(
+                        color: AppColors.mutedOnDark,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: AppSpacing.lg),
+                  FilledButton.icon(
+                    onPressed: onResume,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Resume workout'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ExerciseCard extends ConsumerWidget {
   const _ExerciseCard({
     required this.entry,
@@ -1528,10 +1824,11 @@ class _ExerciseCard extends ConsumerWidget {
   /// completion check — so it moves to a swipe, matching how rows are removed
   /// elsewhere in the app. The only remaining set stays put: an exercise with
   /// no sets has nothing to show.
-  Widget _setRow(int i, List<WorkoutSet>? lastSets) {
+  Widget _setRow(int i, List<WorkoutSet>? lastSets, bool bodyweight) {
     final row = _SetRow(
       index: i,
       set: entry.sets[i],
+      bodyweight: bodyweight,
       // The set at the same position last time, if there was one.
       previousSet: (lastSets != null && i < lastSets.length)
           ? lastSets[i]
@@ -1565,6 +1862,9 @@ class _ExerciseCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final exercise = ref.watch(exercisesByIdProvider).value?[entry.exerciseId];
+    // No load to record: the rows lose their weight field, the header loses
+    // its column, and the volume bar counts reps.
+    final bodyweight = exercise?.isBodyweight ?? false;
     // The most recent time this exercise was logged, matched set-for-set below
     // the entry fields as a reference for what to beat.
     final lastSets = ref
@@ -1680,22 +1980,28 @@ class _ExerciseCard extends ConsumerWidget {
           ),
           if (lastSets != null && lastSets.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.sm),
-            _VolumeBar(entry: entry, lastSets: lastSets),
+            _VolumeBar(
+              entry: entry,
+              lastSets: lastSets,
+              bodyweight: bodyweight,
+            ),
           ],
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [
               const SizedBox(width: 28),
-              Expanded(
-                child: Text(
-                  'Weight (lb)',
-                  textAlign: TextAlign.center,
-                  style: AppTypography.small.copyWith(
-                    color: AppColors.mutedOnDark,
+              if (!bodyweight) ...[
+                Expanded(
+                  child: Text(
+                    'Weight (lb)',
+                    textAlign: TextAlign.center,
+                    style: AppTypography.small.copyWith(
+                      color: AppColors.mutedOnDark,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: AppSpacing.sm),
+                const SizedBox(width: AppSpacing.sm),
+              ],
               Expanded(
                 child: Text(
                   'Reps',
@@ -1709,7 +2015,8 @@ class _ExerciseCard extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: AppSpacing.xs),
-          for (var i = 0; i < entry.sets.length; i++) _setRow(i, lastSets),
+          for (var i = 0; i < entry.sets.length; i++)
+            _setRow(i, lastSets, bodyweight),
           const SizedBox(height: AppSpacing.sm),
           TextButton.icon(
             onPressed: () {
@@ -1820,10 +2127,19 @@ String _volumeLabel(double value) =>
 ///
 /// Hidden entirely until the exercise has history to measure against.
 class _VolumeBar extends StatelessWidget {
-  const _VolumeBar({required this.entry, required this.lastSets});
+  const _VolumeBar({
+    required this.entry,
+    required this.lastSets,
+    required this.bodyweight,
+  });
 
   final _ExerciseEntry entry;
   final List<WorkoutSet> lastSets;
+
+  /// Settles the unit as reps outright, rather than leaving the comparison to
+  /// infer it — history from before the exercise was marked may still carry a
+  /// weight, and one stray figure would put the bar back on tonnage.
+  final bool bodyweight;
 
   @override
   Widget build(BuildContext context) {
@@ -1840,6 +2156,7 @@ class _VolumeBar extends StatelessWidget {
           previous: [
             for (final s in lastSets) (weight: s.weight, reps: s.reps),
           ],
+          bodyweight: bodyweight,
         );
         if (!volume.hasHistory) return const SizedBox.shrink();
 
@@ -1901,10 +2218,15 @@ class _SetRow extends StatelessWidget {
     required this.set,
     required this.previousSet,
     required this.onCompleted,
+    required this.bodyweight,
   });
 
   final int index;
   final _SetEntry set;
+
+  /// Drops the weight field entirely: a push-up has no load to record, and an
+  /// empty box that must never be filled is a question the app shouldn't ask.
+  final bool bodyweight;
 
   /// What was logged for this set position last time, shown greyed below the
   /// fields as a reference. Null when there is no matching historical set.
@@ -1930,17 +2252,19 @@ class _SetRow extends StatelessWidget {
       return;
     }
 
-    _fillIfBlank(
-      set.weightController,
-      previousSet?.weight == null ? null : trimNumber(previousSet!.weight!),
-    );
+    if (!bodyweight) {
+      _fillIfBlank(
+        set.weightController,
+        previousSet?.weight == null ? null : trimNumber(previousSet!.weight!),
+      );
+    }
     _fillIfBlank(set.repsController, previousSet?.reps?.toString());
 
     // With nothing typed and no history to borrow, there is nothing to mark
     // complete — an empty set is dropped on save, so a check here would promise
     // a record that never gets written. Send the user to the field instead.
     if (set.isEmpty) {
-      set.weightFocus.requestFocus();
+      (bodyweight ? set.repsFocus : set.weightFocus).requestFocus();
       return;
     }
 
@@ -1951,7 +2275,7 @@ class _SetRow extends StatelessWidget {
   /// last blank, the set is done and we move on — the third completing gesture,
   /// alongside the check and Next.
   void _onReferenceFilled() {
-    if (!set.isFull || set.isComplete) return;
+    if (!set.isFull(bodyweight: bodyweight) || set.isComplete) return;
     onCompleted();
   }
 
@@ -1977,15 +2301,17 @@ class _SetRow extends StatelessWidget {
               ),
             ),
           ),
-          Expanded(
-            child: _FieldWithReference(
-              controller: set.weightController,
-              focusNode: set.weightFocus,
-              reference: prevWeight == null ? null : trimNumber(prevWeight),
-              onFilled: _onReferenceFilled,
+          if (!bodyweight) ...[
+            Expanded(
+              child: _FieldWithReference(
+                controller: set.weightController,
+                focusNode: set.weightFocus,
+                reference: prevWeight == null ? null : trimNumber(prevWeight),
+                onFilled: _onReferenceFilled,
+              ),
             ),
-          ),
-          const SizedBox(width: AppSpacing.sm),
+            const SizedBox(width: AppSpacing.sm),
+          ],
           Expanded(
             child: _FieldWithReference(
               controller: set.repsController,
@@ -2015,17 +2341,24 @@ class _SetRow extends StatelessWidget {
                       scale: anim,
                       child: FadeTransition(opacity: anim, child: child),
                     ),
+                    // Sized up from 22/20: this is the control tapped most in a
+                    // session, often with chalk on your hands and the phone on
+                    // the floor. The 2px difference between the two is
+                    // deliberate — check_circle reads smaller than the open
+                    // ring at a matching size, so they are matched by eye
+                    // rather than by number. Both still clear the 40px column,
+                    // whose width the header row mirrors.
                     child: done
                         ? const Icon(
                             Icons.check_circle,
                             key: ValueKey('done'),
-                            size: 22,
+                            size: 26,
                             color: AppColors.success,
                           )
                         : const Icon(
                             Icons.radio_button_unchecked,
                             key: ValueKey('open'),
-                            size: 20,
+                            size: 24,
                             color: AppColors.mutedOnDark,
                           ),
                   );
@@ -2269,8 +2602,11 @@ class _SetEntry {
   bool get isEmpty => weight == null && reps == null;
 
   /// Both fields carry a value, which is what the completing gestures require.
-  bool get isFull =>
-      weightController.text.trim().isNotEmpty &&
+  ///
+  /// [bodyweight] drops the weight half of that: the field isn't on screen, so
+  /// waiting for it would mean a push-up set could never complete itself.
+  bool isFull({bool bodyweight = false}) =>
+      (bodyweight || weightController.text.trim().isNotEmpty) &&
       repsController.text.trim().isNotEmpty;
 
   /// A row emptied after the fact drops its check: empty sets are dropped on

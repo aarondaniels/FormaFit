@@ -16,8 +16,7 @@ class ExerciseDetailScreen extends ConsumerWidget {
   final int exerciseId;
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
-    final sessions =
-        await ref.read(exerciseHistoryProvider(exerciseId).future);
+    final sessions = await ref.read(exerciseHistoryProvider(exerciseId).future);
     if (!context.mounted) return;
 
     final ok = await showDialog<bool>(
@@ -64,8 +63,7 @@ class ExerciseDetailScreen extends ConsumerWidget {
     );
     if (target == null || !context.mounted) return;
 
-    final sessions =
-        await ref.read(exerciseHistoryProvider(source.id).future);
+    final sessions = await ref.read(exerciseHistoryProvider(source.id).future);
     if (!context.mounted) return;
 
     final ok = await showDialog<bool>(
@@ -75,7 +73,7 @@ class ExerciseDetailScreen extends ConsumerWidget {
         content: Text(
           'Move all history from “${source.name}” into “${target.name}”'
           '${sessions.isEmpty ? '' : ' (${sessions.length} '
-              '${sessions.length == 1 ? "session" : "sessions"})'}, '
+                    '${sessions.length == 1 ? "session" : "sessions"})'}, '
           'then delete “${source.name}”. This can’t be undone.',
         ),
         actions: [
@@ -172,7 +170,10 @@ class ExerciseDetailScreen extends ConsumerWidget {
                           child: Column(
                             children: [
                               for (final s in sessions)
-                                _SessionRow(session: s),
+                                _SessionRow(
+                                  session: s,
+                                  bodyweight: exercise.isBodyweight,
+                                ),
                             ],
                           ),
                         ),
@@ -320,19 +321,26 @@ class _ProgressSectionState extends State<_ProgressSection> {
 }
 
 class _SessionRow extends StatelessWidget {
-  const _SessionRow({required this.session});
+  const _SessionRow({required this.session, required this.bodyweight});
 
   final ExerciseSession session;
 
+  /// Drops the tonnage line and the weight on each set chip: this exercise is
+  /// counted in reps.
+  final bool bodyweight;
+
   @override
   Widget build(BuildContext context) {
-    final totalReps = session.sets.fold<int>(0, (sum, s) => sum + (s.reps ?? 0));
+    final totalReps = session.sets.fold<int>(
+      0,
+      (sum, s) => sum + (s.reps ?? 0),
+    );
     final totalVolume = session.volume;
     final n = NumberFormat.decimalPattern();
     final summary = [
       '${session.sets.length} ${session.sets.length == 1 ? "set" : "sets"}',
       if (totalReps > 0) '$totalReps reps',
-      if (totalVolume > 0) '${n.format(totalVolume.round())} lb',
+      if (!bodyweight && totalVolume > 0) '${n.format(totalVolume.round())} lb',
     ].join('  ·  ');
 
     return Padding(
@@ -365,7 +373,7 @@ class _SessionRow extends StatelessWidget {
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
-                    formatSet(s),
+                    formatSet(s, bodyweight: bodyweight),
                     style: AppTypography.small.copyWith(
                       color: AppColors.onDark,
                     ),
@@ -390,8 +398,13 @@ class _SessionRow extends StatelessWidget {
 }
 
 /// "135 × 8", degrading gracefully when only one of the two was recorded.
-String formatSet(WorkoutSet s) {
-  final w = s.weight;
+///
+/// [bodyweight] drops the weight half whatever is stored, so an exercise marked
+/// as carrying no load reads the same way its stats are counted — a leftover
+/// weight from before it was marked (or a 0 out of a Strong CSV) shows as reps
+/// rather than as "0 × 12".
+String formatSet(WorkoutSet s, {bool bodyweight = false}) {
+  final w = bodyweight ? null : s.weight;
   final r = s.reps;
   if (w != null && r != null) return '${trimNumber(w)} × $r';
   if (w != null) return trimNumber(w);

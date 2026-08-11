@@ -74,7 +74,7 @@ class AnalyticsScreen extends ConsumerWidget {
               const SizedBox(height: AppSpacing.lg),
               GlassSection(
                 title: 'Muscle group balance',
-                child: MuscleGroupDonut(volumeByGroup: s.volumeByMuscleGroup),
+                child: MuscleGroupDonut(setsByGroup: s.setsByMuscleGroup),
               ),
               const SizedBox(height: AppSpacing.lg),
               _PersonalRecords(records: s.personalRecords),
@@ -252,6 +252,25 @@ class _Totals extends StatelessWidget {
               ),
             ],
           ),
+          // Bodyweight work is counted in reps and kept out of the volume
+          // figure above, so it gets its own line rather than being added to
+          // pounds. Hidden entirely for someone who logs none.
+          if (stats.totalBodyweightReps > 0) ...[
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: AppSpacing.md),
+              child: Divider(height: 1),
+            ),
+            Row(
+              children: [
+                StatCell(
+                  value: compactNumber(stats.totalBodyweightReps.toDouble()),
+                  label: 'Bodyweight reps',
+                  icon: Icons.accessibility_new,
+                  color: AppColors.primary,
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -269,15 +288,22 @@ class _PersonalRecords extends StatelessWidget {
       return GlassSection(
         title: 'Personal records',
         child: Text(
-          'Log a set with both weight and reps to start tracking records.',
+          'Log a set with weight and reps — or just reps, for a bodyweight '
+          'exercise — to start tracking records.',
           style: AppTypography.caption.copyWith(color: AppColors.mutedOnDark),
         ),
       );
     }
 
-    // Heaviest lifts first — that's what people look for.
+    // Heaviest lifts first — that's what people look for — with the rep
+    // records after them, since the two can't be ranked against each other.
     final sorted = [...records]
-      ..sort((a, b) => b.heaviestWeight.compareTo(a.heaviestWeight));
+      ..sort((a, b) {
+        if (a.isBodyweight != b.isBodyweight) return a.isBodyweight ? 1 : -1;
+        return a.isBodyweight
+            ? (b.bestReps ?? 0).compareTo(a.bestReps ?? 0)
+            : (b.heaviestWeight ?? 0).compareTo(a.heaviestWeight ?? 0);
+      });
 
     return GlassSection(
       title: 'Personal records',
@@ -303,8 +329,10 @@ class _PersonalRecords extends StatelessWidget {
                     ),
                   ),
                   Text(
-                    '${trimNumber(r.heaviestWeight)} lb'
-                    '${r.repsAtHeaviest == null ? '' : ' × ${r.repsAtHeaviest}'}',
+                    r.isBodyweight
+                        ? '${r.bestReps} reps'
+                        : '${trimNumber(r.heaviestWeight ?? 0)} lb'
+                              '${r.repsAtHeaviest == null ? '' : ' × ${r.repsAtHeaviest}'}',
                     style: AppTypography.numeric.copyWith(
                       color: AppColors.primary,
                     ),

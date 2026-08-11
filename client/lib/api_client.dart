@@ -254,6 +254,7 @@ class ApiClient {
     String? description,
     int? equipmentTypeId,
     String? instructions,
+    bool isBodyweight = false,
   }) {
     return _mutate(() async {
       final data = await _load();
@@ -264,6 +265,7 @@ class ApiClient {
         description: description,
         equipmentTypeId: equipmentTypeId,
         instructions: instructions,
+        isBodyweight: isBodyweight,
       );
       data.exercises.add(created);
       await _persist();
@@ -935,6 +937,10 @@ class ApiClient {
   ///
   /// Sets missing a weight or reps are ignored for the load but still counted,
   /// since a bodyweight movement has sets worth carrying over.
+  ///
+  /// With no weight anywhere — a bodyweight exercise — the same "most repeated"
+  /// rule is applied to the reps alone, so "3×20" comes back next time instead
+  /// of an empty template row.
   static ({int sets, double? weight, int? reps}) templateDefaultsFor(
     List<WorkoutSetDraft> sets,
   ) {
@@ -947,7 +953,7 @@ class ApiClient {
       counts[key] = (counts[key] ?? 0) + 1;
     }
     if (counts.isEmpty) {
-      return (sets: sets.length, weight: null, reps: null);
+      return (sets: sets.length, weight: null, reps: _mostRepeatedReps(sets));
     }
     var best = counts.entries.first;
     for (final e in counts.entries) {
@@ -957,6 +963,25 @@ class ApiClient {
       }
     }
     return (sets: sets.length, weight: best.key.$1, reps: best.key.$2);
+  }
+
+  /// The most repeated rep count, ties going to the higher one — the reps-only
+  /// half of [templateDefaultsFor], for sets that carry no weight.
+  static int? _mostRepeatedReps(List<WorkoutSetDraft> sets) {
+    final counts = <int, int>{};
+    for (final s in sets) {
+      final r = s.reps;
+      if (r == null) continue;
+      counts[r] = (counts[r] ?? 0) + 1;
+    }
+    if (counts.isEmpty) return null;
+    var best = counts.entries.first;
+    for (final e in counts.entries) {
+      if (e.value > best.value || (e.value == best.value && e.key > best.key)) {
+        best = e;
+      }
+    }
+    return best.key;
   }
 
   // -------------------------------------------------------------------------
@@ -976,17 +1001,17 @@ class ApiClient {
 
     var totalSets = 0;
     var totalVolume = 0.0;
+    var totalBodyweightReps = 0;
     var totalDuration = 0;
     var effortSum = 0;
     var thisWeek = 0;
     var thisMonth = 0;
     final volumeByWeek = <DateTime, double>{};
     final countByWeek = <DateTime, int>{};
-    final volumeByMuscle = <String, double>{};
+    final setsByMuscle = <String, double>{};
 
     for (final w in workouts) {
       totalSets += w.setCount;
-      totalVolume += w.volume;
       totalDuration += w.duration ?? 0;
       effortSum += w.effortLevel;
 
@@ -995,12 +1020,27 @@ class ApiClient {
       if (!day.isBefore(monthStart)) thisMonth++;
 
       final bucket = _weekStart(day);
-      volumeByWeek[bucket] = (volumeByWeek[bucket] ?? 0) + w.volume;
       countByWeek[bucket] = (countByWeek[bucket] ?? 0) + 1;
 
       for (final we in w.exercises) {
-        final group = _groupFor(byId[we.exerciseId]);
-        volumeByMuscle[group] = (volumeByMuscle[group] ?? 0) + we.volume;
+        final exercise = byId[we.exerciseId];
+        final group = _groupFor(exercise);
+        // Sets, not tonnage: the one unit a push-up and a deadlift share.
+        setsByMuscle[group] = (setsByMuscle[group] ?? 0) + we.sets.length;
+
+        // Tonnage and reps are tallied into separate totals, never summed.
+        // Weight stored against a bodyweight exercise — logged before it was
+        // marked, or imported from a CSV that wrote a 0 — is ignored rather
+        // than counted. So marking an exercise does drop its past tonnage out
+        // of these totals, which is the honest reading of the user declaring
+        // that a load means nothing for this movement. The sets themselves are
+        // never touched, so unmarking it brings the figures straight back.
+        if (exercise?.isBodyweight ?? false) {
+          totalBodyweightReps += we.totalReps;
+        } else {
+          totalVolume += we.volume;
+          volumeByWeek[bucket] = (volumeByWeek[bucket] ?? 0) + we.volume;
+        }
       }
     }
 
@@ -1008,6 +1048,7 @@ class ApiClient {
       totalWorkouts: workouts.length,
       totalSets: totalSets,
       totalVolume: totalVolume,
+      totalBodyweightReps: totalBodyweightReps,
       totalDuration: totalDuration,
       workoutsThisWeek: thisWeek,
       workoutsThisMonth: thisMonth,
@@ -1017,7 +1058,7 @@ class ApiClient {
       frequencyByWeek: _series(
         countByWeek.map((k, v) => MapEntry(k, v.toDouble())),
       ),
-      volumeByMuscleGroup: Map.unmodifiable(volumeByMuscle),
+      setsByMuscleGroup: Map.unmodifiable(setsByMuscle),
       personalRecords: _personalRecords(workouts, byId),
     );
   }
@@ -1039,13 +1080,21 @@ class ApiClient {
     for (final w in sorted) {
       for (final we in w.exercises) {
         if (we.exerciseId != exerciseId) continue;
-        final top = we.topWeight;
-        if (top != null) topWeight.add(TimePoint(w.date, top));
-        if (we.volume > 0) volume.add(TimePoint(w.date, we.volume));
-        final orm = _bestOneRepMax(we.sets);
-        if (orm != null) oneRepMax.add(TimePoint(w.date, orm));
-        final totalReps = we.sets.fold<int>(0, (sum, s) => sum + (s.reps ?? 0));
-        if (totalReps > 0) reps.add(TimePoint(w.date, totalReps.toDouble()));
+        // Reps are the only honest series for a bodyweight movement: tonnage
+        // is zero, a heaviest weight is meaningless, and an estimated 1RM off
+        // a load of nothing is nonsense. Leaving those series empty is what
+        // makes the detail screen offer only the reps chart, since every metric
+        // there is gated on having points.
+        if (!exercise.isBodyweight) {
+          final top = we.topWeight;
+          if (top != null) topWeight.add(TimePoint(w.date, top));
+          if (we.volume > 0) volume.add(TimePoint(w.date, we.volume));
+          final orm = _bestOneRepMax(we.sets);
+          if (orm != null) oneRepMax.add(TimePoint(w.date, orm));
+        }
+        if (we.totalReps > 0) {
+          reps.add(TimePoint(w.date, we.totalReps.toDouble()));
+        }
       }
     }
 
@@ -1187,12 +1236,34 @@ class ApiClient {
     final best = <int, PersonalRecord>{};
     for (final w in workouts) {
       for (final we in w.exercises) {
+        // A bodyweight exercise has no load to rank sets by, so its record is
+        // the most reps in a single set. Without this it has no record at all:
+        // the weighted path below skips every set with no weight.
+        if (byId[we.exerciseId]?.isBodyweight ?? false) {
+          for (final s in we.sets) {
+            final reps = s.reps;
+            if (reps == null || reps <= 0) continue;
+            final existing = best[we.exerciseId];
+            if (existing != null && (existing.bestReps ?? 0) >= reps) continue;
+            best[we.exerciseId] = PersonalRecord(
+              exerciseId: we.exerciseId,
+              exerciseName: byId[we.exerciseId]?.name ?? 'Unknown exercise',
+              heaviestWeight: null,
+              repsAtHeaviest: null,
+              achievedOn: w.date,
+              bestSetVolume: 0,
+              isBodyweight: true,
+              bestReps: reps,
+            );
+          }
+          continue;
+        }
         for (final s in we.sets) {
           final weight = s.weight;
           final reps = s.reps;
           if (weight == null || reps == null || weight <= 0) continue;
           final existing = best[we.exerciseId];
-          if (existing != null && existing.heaviestWeight >= weight) {
+          if (existing != null && (existing.heaviestWeight ?? 0) >= weight) {
             // Not a weight PR, but it may still be the biggest single set.
             if (s.volume > existing.bestSetVolume) {
               best[we.exerciseId] = PersonalRecord(
@@ -1734,6 +1805,31 @@ class _AppData {
     measurements: [],
   );
 
+  /// Reads one stored exercise, backfilling `is_bodyweight` for the seeded
+  /// library the first time a store written before that field is opened.
+  ///
+  /// Without this the flags would only ever reach a fresh install: seeding runs
+  /// once, and `restoreDefaultExercises` deliberately only re-adds what was
+  /// deleted. Someone with a year of history would have had to go and mark
+  /// push-ups by hand.
+  ///
+  /// Scoped tightly on purpose — only exercises still marked `is_default`, only
+  /// ids the seed table knows, and only when the key is *absent*. It runs on
+  /// every load until the next write persists the key, which is harmless
+  /// because it is idempotent, and the absent-key condition is what stops it
+  /// overruling a user who turns the flag off themselves.
+  static Exercise _exerciseFromJson(Map<String, dynamic> json) {
+    final parsed = Exercise.fromJson(json);
+    if (json.containsKey('is_bodyweight') || !parsed.isDefault) return parsed;
+    final seeded = _seededBodyweightIds.contains(parsed.id);
+    return seeded ? parsed.copyWith(isBodyweight: true) : parsed;
+  }
+
+  static final Set<int> _seededBodyweightIds = {
+    for (final e in defaultExercises())
+      if (e.isBodyweight) e.id,
+  };
+
   factory _AppData.fromJson(Map<String, dynamic> json) {
     final version = json['schema_version'] as int? ?? schemaVersion;
     if (version > schemaVersion) {
@@ -1754,7 +1850,7 @@ class _AppData {
           .map((e) => EquipmentType.fromJson(e as Map<String, dynamic>))
           .toList(),
       exercises: (json['exercises'] as List? ?? [])
-          .map((e) => Exercise.fromJson(e as Map<String, dynamic>))
+          .map((e) => _exerciseFromJson(e as Map<String, dynamic>))
           .toList(),
       workouts: (json['workouts'] as List? ?? [])
           .map((e) => Workout.fromJson(e as Map<String, dynamic>))

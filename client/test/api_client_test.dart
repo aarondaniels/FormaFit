@@ -26,6 +26,14 @@ class _FakePathProvider extends PathProviderPlatform
   Future<String?> getTemporaryPath() async => root;
 }
 
+/// Seeded exercise carrying a load — Barbell Bench Press. Anything asserting on
+/// weight, tonnage or a 1RM has to use this rather than a bodyweight movement,
+/// whose weights are deliberately ignored.
+const loadedExerciseId = 3;
+
+/// Seeded exercise marked bodyweight — Push-ups. Measured in reps throughout.
+const bodyweightExerciseId = 1;
+
 void main() {
   late Directory dir;
 
@@ -278,7 +286,7 @@ void main() {
         effortLevel: 5,
         exercises: [
           WorkoutExerciseDraft(
-            exerciseId: 1,
+            exerciseId: loadedExerciseId,
             sets: [
               WorkoutSetDraft(weight: 100, reps: 5),
               WorkoutSetDraft(weight: 185, reps: 3),
@@ -300,7 +308,7 @@ void main() {
         effortLevel: 5,
         exercises: [
           WorkoutExerciseDraft(
-            exerciseId: 1,
+            exerciseId: loadedExerciseId,
             sets: [
               WorkoutSetDraft(weight: 100, reps: 5),
               WorkoutSetDraft(reps: 10),
@@ -311,6 +319,92 @@ void main() {
       );
 
       expect((await api.stats()).totalVolume, 500);
+    });
+
+    test('bodyweight work is counted in reps, not pounds', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: bodyweightExerciseId,
+            sets: [WorkoutSetDraft(reps: 20), WorkoutSetDraft(reps: 15)],
+          ),
+          WorkoutExerciseDraft(
+            exerciseId: loadedExerciseId,
+            sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+          ),
+        ],
+      );
+
+      final stats = await api.stats();
+      // The two units are reported side by side and never added together.
+      expect(stats.totalVolume, 500);
+      expect(stats.totalBodyweightReps, 35);
+    });
+
+    test('a weight stored against a bodyweight exercise is ignored', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            // Logged before the exercise was marked, or imported from a CSV
+            // that wrote a 0. The set is kept, but its load is not counted.
+            exerciseId: bodyweightExerciseId,
+            sets: [WorkoutSetDraft(weight: 45, reps: 20)],
+          ),
+        ],
+      );
+
+      final stats = await api.stats();
+      expect(stats.totalVolume, 0);
+      expect(stats.totalBodyweightReps, 20);
+    });
+
+    test('bodyweight sets still count toward muscle balance', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            // Push-ups — Chest. Weighed nothing, so a tonnage split would drop
+            // the whole session off the chart.
+            exerciseId: bodyweightExerciseId,
+            sets: [WorkoutSetDraft(reps: 20), WorkoutSetDraft(reps: 20)],
+          ),
+        ],
+      );
+
+      expect((await api.stats()).setsByMuscleGroup['Chest'], 2);
+    });
+
+    test('a bodyweight record is the most reps in a set', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: bodyweightExerciseId,
+            sets: [
+              WorkoutSetDraft(reps: 12),
+              WorkoutSetDraft(reps: 25),
+              WorkoutSetDraft(reps: 18),
+            ],
+          ),
+        ],
+      );
+
+      final pr = (await api.stats()).personalRecords.single;
+      expect(pr.isBodyweight, isTrue);
+      expect(pr.bestReps, 25);
+      // No load to rank by, so the weighted fields stay empty rather than
+      // reporting a zero that would sort against real lifts.
+      expect(pr.heaviestWeight, isNull);
     });
 
     test('the week streak counts back from the current week', () async {
@@ -890,11 +984,22 @@ void main() {
       expect(d.reps, 8);
     });
 
-    test('bodyweight sets still count, with no load to carry', () {
+    test('bodyweight sets carry their reps, with no load', () {
       final d = ApiClient.templateDefaultsFor(sets([(null, 12), (null, 10)]));
       expect(d.sets, 2);
       expect(d.weight, isNull);
-      expect(d.reps, isNull);
+      // Same "most repeated, ties to the higher" rule as the weighted path,
+      // applied to reps alone — a template of push-ups should come back as
+      // 2×12 rather than as empty rows.
+      expect(d.reps, 12);
+    });
+
+    test('bodyweight reps take the most repeated count', () {
+      final d = ApiClient.templateDefaultsFor(
+        sets([(null, 20), (null, 15), (null, 15)]),
+      );
+      expect(d.weight, isNull);
+      expect(d.reps, 15);
     });
 
     test('an incomplete set counts toward the set total only', () {
@@ -1012,6 +1117,25 @@ void main() {
       expect(v.progress, greaterThan(1));
     });
 
+    test(
+      'a bodyweight exercise stays on reps despite a stray weight',
+      () async {
+        final v = VolumeComparison.of(
+          current: loads([(null, 20)]),
+          // A weight logged before the exercise was marked bodyweight. The
+          // inference alone would put this back on tonnage; the flag must win,
+          // or the bar would compare 20 reps against 900 lb.
+          previous: loads([(45, 20)]),
+          bodyweight: true,
+        );
+
+        expect(v.repsOnly, isTrue);
+        expect(v.unit, 'reps');
+        expect(v.current, 20);
+        expect(v.previousTotal, 20);
+      },
+    );
+
     test('one loaded set keeps the whole exercise on tonnage', () async {
       final v = VolumeComparison.of(
         // Weighted pull-ups: some sets carry a belt, some don't.
@@ -1045,6 +1169,114 @@ void main() {
       expect(v.hasHistory, isFalse);
       expect(v.previousAtPace, isNull);
       expect(v.progress, 0);
+    });
+  });
+
+  group('bodyweight exercises', () {
+    test('the flag survives a write and a reload', () async {
+      final api = ApiClient();
+      final created = await api.createExercise(
+        name: 'Sit-ups',
+        muscleGroup: 'Core',
+        isBodyweight: true,
+      );
+
+      // Reopen against the same file so this goes through toJson/fromJson.
+      final reloaded = (await ApiClient().listExercises()).firstWhere(
+        (e) => e.id == created.id,
+      );
+      expect(reloaded.isBodyweight, isTrue);
+    });
+
+    test('an older store gets the seeded flags backfilled', () async {
+      final api = ApiClient();
+      final mine = await api.createExercise(name: 'Handstand hold');
+      // Strip the key from every record, which is exactly what a store written
+      // before this field looks like.
+      final raw =
+          jsonDecode(storeFile().readAsStringSync()) as Map<String, dynamic>;
+      for (final e in raw['exercises'] as List) {
+        (e as Map<String, dynamic>).remove('is_bodyweight');
+      }
+      storeFile().writeAsStringSync(jsonEncode(raw));
+
+      final exercises = await ApiClient().listExercises();
+      // Loads rather than quarantining, and the seeded library picks up its
+      // flags — otherwise they would only ever reach a fresh install.
+      expect(exercises, hasLength(41));
+      expect(
+        exercises.firstWhere((e) => e.id == bodyweightExerciseId).isBodyweight,
+        isTrue,
+      );
+      expect(
+        exercises.firstWhere((e) => e.id == loadedExerciseId).isBodyweight,
+        isFalse,
+      );
+      // A user's own exercise is never guessed at.
+      expect(
+        exercises.firstWhere((e) => e.id == mine.id).isBodyweight,
+        isFalse,
+      );
+    });
+
+    test('an explicit false is never overruled by the backfill', () async {
+      final api = ApiClient();
+      await api.listExercises();
+      final raw =
+          jsonDecode(storeFile().readAsStringSync()) as Map<String, dynamic>;
+      for (final e in raw['exercises'] as List) {
+        final m = e as Map<String, dynamic>;
+        if (m['id'] == bodyweightExerciseId) m['is_bodyweight'] = false;
+      }
+      storeFile().writeAsStringSync(jsonEncode(raw));
+
+      // Someone who decides they do weighted push-ups keeps that decision.
+      final exercises = await ApiClient().listExercises();
+      expect(
+        exercises.firstWhere((e) => e.id == bodyweightExerciseId).isBodyweight,
+        isFalse,
+      );
+    });
+
+    test('progression charts reps and offers no weight series', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: bodyweightExerciseId,
+            // Carrying a stray weight, which must not produce a 1RM or a
+            // heaviest-weight line for a movement that has no load.
+            sets: [WorkoutSetDraft(weight: 45, reps: 20)],
+          ),
+        ],
+      );
+
+      final p = await api.exerciseProgress(bodyweightExerciseId);
+      expect(p.reps.single.value, 20);
+      expect(p.topWeight, isEmpty);
+      expect(p.estimatedOneRepMax, isEmpty);
+      expect(p.volume, isEmpty);
+    });
+
+    test('a loaded exercise still charts weight and 1RM', () async {
+      final api = ApiClient();
+      await api.createWorkout(
+        date: DateTime(2026, 7, 1),
+        effortLevel: 5,
+        exercises: [
+          WorkoutExerciseDraft(
+            exerciseId: loadedExerciseId,
+            sets: [WorkoutSetDraft(weight: 100, reps: 5)],
+          ),
+        ],
+      );
+
+      final p = await api.exerciseProgress(loadedExerciseId);
+      expect(p.topWeight.single.value, 100);
+      expect(p.volume.single.value, 500);
+      expect(p.estimatedOneRepMax, hasLength(1));
     });
   });
 

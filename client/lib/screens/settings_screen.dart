@@ -386,8 +386,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 subtitle: Text(
                   'If a workout is left open for '
                   '${WorkoutReminder.idleAfter.inMinutes} minutes without a '
-                  'change, Forma sends a notification so it does not sit there '
-                  'unsaved.',
+                  'change — or paused for '
+                  '${WorkoutReminder.pausedAfter.inHours} hour — Forma sends a '
+                  'notification so it does not sit there unsaved.',
                   style: AppTypography.small.copyWith(
                     color: AppColors.mutedOnDark,
                   ),

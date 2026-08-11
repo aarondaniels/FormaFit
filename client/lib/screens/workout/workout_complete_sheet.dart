@@ -13,12 +13,15 @@ import '../dashboard_screen.dart' show compactNumber;
 class PrHighlight {
   const PrHighlight({
     required this.exerciseName,
-    required this.weight,
+    this.weight,
     required this.reps,
   });
 
   final String exerciseName;
-  final double weight;
+
+  /// Null for a bodyweight exercise, whose record is the rep count alone.
+  final double? weight;
+
   final int reps;
 }
 
@@ -54,6 +57,7 @@ class WorkoutSummary {
     required this.exerciseCount,
     required this.setCount,
     required this.volume,
+    required this.bodyweightReps,
     required this.durationLabel,
     required this.totalWorkouts,
     required this.workoutsThisWeek,
@@ -64,7 +68,14 @@ class WorkoutSummary {
 
   final int exerciseCount;
   final int setCount;
+
+  /// Tonnage, in pounds — bodyweight exercises contribute nothing to it.
   final double volume;
+
+  /// Reps across the session's bodyweight exercises, shown in place of the
+  /// tonnage when the session carried no load at all.
+  final int bodyweightReps;
+
   final String durationLabel;
 
   /// Per-exercise work against the previous session, in the order trained.
@@ -129,10 +140,7 @@ class _WorkoutCompleteSheet extends StatelessWidget {
               _Header(hasPr: hasPr, summary: summary),
               const SizedBox(height: AppSpacing.lg),
               _sessionCard(),
-              if (hasPr) ...[
-                const SizedBox(height: AppSpacing.md),
-                _prCard(),
-              ],
+              if (hasPr) ...[const SizedBox(height: AppSpacing.md), _prCard()],
               if (summary.volumeChanges.isNotEmpty) ...[
                 const SizedBox(height: AppSpacing.md),
                 _volumeCard(),
@@ -147,7 +155,9 @@ class _WorkoutCompleteSheet extends StatelessWidget {
                   style: FilledButton.styleFrom(
                     backgroundColor: AppColors.primary,
                     foregroundColor: AppColors.onPrimary,
-                    padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: AppSpacing.md,
+                    ),
                   ),
                   child: const Text('Done'),
                 ),
@@ -181,12 +191,22 @@ class _WorkoutCompleteSheet extends StatelessWidget {
             color: AppColors.success,
           ),
           const CellDivider(),
-          StatCell(
-            value: compactNumber(summary.volume),
-            label: 'Volume (lb)',
-            icon: Icons.scale,
-            color: AppColors.warning,
-          ),
+          // Reps for a session that carried no load, so a workout of push-ups
+          // isn't congratulated with a 0.
+          if (summary.volume > 0 || summary.bodyweightReps == 0)
+            StatCell(
+              value: compactNumber(summary.volume),
+              label: 'Volume (lb)',
+              icon: Icons.scale,
+              color: AppColors.warning,
+            )
+          else
+            StatCell(
+              value: '${summary.bodyweightReps}',
+              label: 'Reps',
+              icon: Icons.accessibility_new,
+              color: AppColors.warning,
+            ),
           const CellDivider(),
           StatCell(
             value: summary.durationLabel,
@@ -377,7 +397,9 @@ class _PrRow extends StatelessWidget {
         ),
         const SizedBox(width: AppSpacing.sm),
         Text(
-          '${_formatWeight(pr.weight)} lb × ${pr.reps}',
+          pr.weight == null
+              ? '${pr.reps} reps'
+              : '${_formatWeight(pr.weight!)} lb × ${pr.reps}',
           style: AppTypography.numeric.copyWith(color: AppColors.warning),
         ),
       ],

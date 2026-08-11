@@ -81,6 +81,7 @@ class WorkoutDetailScreen extends ConsumerWidget {
               message: 'It may have been deleted.',
             );
           }
+          final work = workoutWork(w, exercises);
           return ListView(
             padding: glassPagePadding(context),
             children: [
@@ -119,11 +120,19 @@ class WorkoutDetailScreen extends ConsumerWidget {
                           ),
                         ),
                         Expanded(
-                          child: StatTile(
-                            value: compactNumber(w.volume),
-                            label: 'Volume (lb)',
-                            color: AppColors.warning,
-                          ),
+                          // A session with no loaded exercise reports its work
+                          // in reps rather than as a flat 0 lb.
+                          child: work.tonnage > 0 || work.bodyweightReps == 0
+                              ? StatTile(
+                                  value: compactNumber(work.tonnage),
+                                  label: 'Volume (lb)',
+                                  color: AppColors.warning,
+                                )
+                              : StatTile(
+                                  value: '${work.bodyweightReps}',
+                                  label: 'Reps',
+                                  color: AppColors.warning,
+                                ),
                         ),
                         Expanded(
                           child: StatTile(
@@ -156,6 +165,7 @@ class WorkoutDetailScreen extends ConsumerWidget {
                   child: _ExerciseBlock(
                     name: exercises[we.exerciseId]?.name ?? 'Unknown exercise',
                     exercise: we,
+                    bodyweight: exercises[we.exerciseId]?.isBodyweight ?? false,
                   ),
                 ),
             ],
@@ -197,10 +207,7 @@ class _HealthSectionState extends ConsumerState<_HealthSection> {
       final w = widget.workout;
 
       if (!await health.hasWorkoutInWindow(start: w.date, end: w.endsAt)) {
-        final failure = await health.writeWorkout(
-          start: w.date,
-          end: w.endsAt,
-        );
+        final failure = await health.writeWorkout(start: w.date, end: w.endsAt);
         if (failure != null) {
           if (mounted) {
             ScaffoldMessenger.of(
@@ -268,18 +275,14 @@ class _HealthSectionState extends ConsumerState<_HealthSection> {
                   ),
                   Expanded(
                     child: StatTile(
-                      value: w.avgHeartRate == null
-                          ? '—'
-                          : '${w.avgHeartRate}',
+                      value: w.avgHeartRate == null ? '—' : '${w.avgHeartRate}',
                       label: 'Avg bpm',
                       color: AppColors.error,
                     ),
                   ),
                   Expanded(
                     child: StatTile(
-                      value: w.maxHeartRate == null
-                          ? '—'
-                          : '${w.maxHeartRate}',
+                      value: w.maxHeartRate == null ? '—' : '${w.maxHeartRate}',
                       label: 'Max bpm',
                       color: AppColors.warning,
                     ),
@@ -300,10 +303,18 @@ class _HealthSectionState extends ConsumerState<_HealthSection> {
 }
 
 class _ExerciseBlock extends StatelessWidget {
-  const _ExerciseBlock({required this.name, required this.exercise});
+  const _ExerciseBlock({
+    required this.name,
+    required this.exercise,
+    required this.bodyweight,
+  });
 
   final String name;
   final WorkoutExercise exercise;
+
+  /// Swaps the exercise's tonnage readout for a rep count, and drops the
+  /// weight from each set line.
+  final bool bodyweight;
 
   @override
   Widget build(BuildContext context) {
@@ -353,7 +364,9 @@ class _ExerciseBlock extends StatelessWidget {
                 const SizedBox(width: AppSpacing.sm),
               ],
               Text(
-                '${exercise.volume.round()} lb',
+                bodyweight
+                    ? '${exercise.totalReps} reps'
+                    : '${exercise.volume.round()} lb',
                 style: AppTypography.small.copyWith(
                   color: AppColors.mutedOnDark,
                 ),
@@ -375,7 +388,10 @@ class _ExerciseBlock extends StatelessWidget {
                       ),
                     ),
                   ),
-                  Text(formatSet(s), style: AppTypography.numeric),
+                  Text(
+                    formatSet(s, bodyweight: bodyweight),
+                    style: AppTypography.numeric,
+                  ),
                 ],
               ),
             ),

@@ -10,7 +10,7 @@ All work happens in `client/` — the repo root holds only the README and this f
 cd client
 flutter pub get
 flutter analyze                  # must be clean; it is today
-flutter test                     # 83 tests, all in test/api_client_test.dart
+flutter test                     # 94 tests, all in test/api_client_test.dart
 flutter run                      # iOS simulator is the verified target
 ```
 
@@ -47,7 +47,7 @@ is no network layer anywhere in the app. Don't add HTTP calls, auth, or caching
 layers on the assumption that a server exists — cross-device sync is
 deliberately out of scope, and export/import is the answer to "move my data".
 
-This one file is ~1,800 lines and holds both storage and every derived-value
+This one file is ~1,900 lines and holds both storage and every derived-value
 computation (stats, muscle recovery, personal records, 1RM progression, CSV
 import/export). Derived values are computed on read and never persisted, so
 they cannot drift from the underlying history — keep it that way rather than
@@ -121,7 +121,7 @@ involvement.
 ### The workout logger
 
 [lib/screens/workout/log_workout_screen.dart](client/lib/screens/workout/log_workout_screen.dart)
-is the largest and most intricate screen (~2,300 lines, and overdue a split) and
+is the largest and most intricate screen (~2,600 lines, and overdue a split) and
 carries most of the app's real-time behavior. It composes a workout **entirely in memory**
 (`_ExerciseEntry` / `_SetEntry` drafts) and writes it in one shot on save, so an
 abandoned session leaves nothing half-logged. Editing an existing workout
@@ -191,6 +191,17 @@ Things in here that were deliberate and are worth not undoing:
   session's total, while the figure beside it is set-matched — this session
   against the *same number of sets* last time. A raw delta partway through an
   exercise is only ever a large negative number.
+- **Pause stops the clock and makes the session inert.** The control is in the
+  app bar beside the elapsed time, and pausing stops the `Stopwatch` (so the
+  break never reaches the saved duration — nothing subtracts anything), cancels
+  the 1s ticker, freezes the rest countdown by stashing its remaining seconds
+  and dropping `_restEndTime`, and drops focus so the number pad can't be typed
+  into. `_PausedOverlay` covers the logging surface behind an `AbsorbPointer`,
+  which is also what stops a set completion from starting rest on a stopped
+  clock. The app bar is a Scaffold sibling of the body and paints above it, so
+  close, save and resume stay reachable. `_pausedAt` is the flag as well as the
+  timestamp. Like the rest of the draft it is memory-only: leaving the logger
+  discards a paused session exactly as it discards a running one.
 - **The workout date carries a real time of day**, and it is the session start:
   Apple Health is queried for `[date, date + duration]`. `showDatePicker`
   returns midnight, so anything editing the date must splice the old time back
@@ -241,8 +252,18 @@ Android's equivalent is Health Connect, a separate API that is not implemented.
 ### Notifications
 
 [lib/workout_reminder.dart](client/lib/workout_reminder.dart) raises one alert
-and only one: the logger has been open and untouched for 30 minutes, so a
-workout is sitting there unsaved.
+and only one: a workout is sitting there unsaved. Two windows lead to it — the
+logger open and untouched for 30 minutes (`idleAfter`), or *paused* for an hour
+(`pausedAfter`).
+
+- **The paused window is longer, and touches don't push it out.** Pausing is the
+  user saying the break is deliberate, so the untouched timetable would be
+  nagging them for doing the right thing; and since a paused session is waiting
+  on a resume, scrolling back through it while paused is not coming back to it.
+  `_noteActivity` no-ops while paused, and the paused reminder is armed once, at
+  the pause. Resuming clears the throttle and re-arms the idle one.
+- **Both share the one pending request** (`forma.workout_idle`), so a workout is
+  never waiting on two alerts at once.
 
 - **They are local notifications, not push.** There is no backend and no
   account, so there is nothing to push *from* — see "There is no backend". If a
@@ -362,6 +383,38 @@ workout is sitting there unsaved.
   the app has both cutters and bulkers, and coloring a gain red would
   congratulate half of them for the opposite of their goal. `kind` is a
   free-form string, so new kinds need no schema change.
+- **`Exercise.isBodyweight` means "a load is meaningless here", and it is not
+  the Bodyweight equipment type.** Equipment id 1 covers pull-ups and dips,
+  which take a belt; hiding their weight field would make a loaded set
+  impossible to record. The flag is seeded true only where loading is unusual
+  (push-ups, plank, crunches, mountain climbers, bicycle crunches, glute
+  bridges, donkey kicks, fire hydrants, jump rope) and left false everywhere it
+  is arguable — squats, lunges, calf raises, pull-ups, dips. When in doubt
+  leave it false: an ignorable empty box beats a field someone needs and can't
+  find. Users set it per exercise in the editor. It is a *defaulted* field, so
+  it needed no schema bump. **An existing store is backfilled on load** by
+  `_AppData._exerciseFromJson`: seeding runs once and `restoreDefaultExercises`
+  only re-adds deleted entries, so without it the flags would have reached new
+  installs only and everyone else would have marked push-ups by hand. The
+  backfill is narrow — `is_default` records, ids in the seed table, and only
+  where the key is *absent*, which is what stops it overruling someone who
+  turns the flag off. It is idempotent and re-runs on each load until the next
+  write persists the key.
+- **A marked exercise is measured in reps, everywhere.** The weight field goes
+  from the logger row, the header column and the template editor; the record
+  becomes most reps in a set (`PersonalRecord.isBodyweight`/`bestReps`); the
+  1RM and heaviest-weight series stay empty so the detail screen offers only
+  the reps chart; and `stats()` adds its reps to `totalBodyweightReps` rather
+  than `totalVolume`. **Pounds and reps are never summed into one figure** —
+  that is why there are two totals rather than a cleverer one.
+- **Stored weight on a marked exercise is ignored, not deleted.** Sets logged
+  before it was marked, or a `0` out of a Strong CSV, stay in the store and are
+  skipped by every calculation and by `formatSet`. Marking an exercise
+  therefore does drop its past tonnage out of the totals, and unmarking brings
+  it straight back.
+- **Muscle balance is counted in sets, not tonnage** (`setsByMuscleGroup`).
+  Tonnage cannot describe a push-up, so a calisthenics chest day used to vanish
+  from the donut entirely. Sets are the one unit both kinds of exercise share.
 - **`VolumeComparison` measures work in whichever unit the exercise is loaded
   with.** Tonnage (`weight × reps`) normally, but total *reps* when neither
   session has a loaded set — bodyweight movements multiply out to zero, and a
@@ -372,10 +425,13 @@ workout is sitting there unsaved.
 ## Testing
 
 Only the store and pure computation are covered —
-[test/api_client_test.dart](client/test/api_client_test.dart), 83 tests across
+[test/api_client_test.dart](client/test/api_client_test.dart), 94 tests across
 seeding, workouts, stats, recovery, templates, measurements, persistence,
-export/import, CSV, volume comparison, stored Health metrics, preferences and
-workout age. **There are no widget tests at all**, so every screen change rests
+export/import, CSV, volume comparison, bodyweight exercises, stored Health
+metrics, preferences and workout age. Fixtures use `loadedExerciseId` (3,
+Barbell Bench Press) for anything asserting on weight — seeded id 1 is
+Push-ups, which is marked bodyweight and whose weights are deliberately
+ignored. **There are no widget tests at all**, so every screen change rests
 on running the app.
 
 Tests swap in a `_FakePathProvider` pointing `path_provider` at a temp
